@@ -7,6 +7,7 @@ using Newtonsoft.Json.Linq;
 
 namespace Autumn.Kafka.MessageHandlers
 {
+    
     public abstract class JsonMessageHandler
     {
         private readonly IProducer<string,JObject> _producer;
