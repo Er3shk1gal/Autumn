@@ -5,9 +5,8 @@ using System.Threading.Tasks;
 
 namespace Autumn.Kafka.Utils.Models
 {
-    public class TopicInfo
+    public class MessageHandlerConfig
     {
-        public string TopicName { get; set; } = null!;
-        public int PartitionNumber { get; set; }
+        HashSet<KafkaMethodExecutionConfig> kafkaMethodExecutionConfigs {get;set;} = null!;
     }
 }

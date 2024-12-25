@@ -9,6 +9,6 @@ namespace Autumn.Kafka.Utils.Models
     {
         public string TopicName { get; set; } = null!;
         public int PartitionsCount {get;set;}
-        public short ReplicationFactor {get;set;}
+        public short? ReplicationFactor {get;set;} = 1;
     }
 }
