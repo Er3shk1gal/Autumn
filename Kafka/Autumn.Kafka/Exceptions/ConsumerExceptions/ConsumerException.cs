@@ -1,4 +1,4 @@
-﻿namespace Autumn.Kafka.Exceptions.ProducerExceptions;
+﻿namespace Autumn.Kafka.Exceptions.ConsumerExceptions;
 
 public class ConsumerException : KafkaException
 {

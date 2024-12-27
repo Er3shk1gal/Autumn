@@ -11,22 +11,22 @@ namespace Autumn.Kafka.Utils
 {
     public static class ServiceResolver
     {
-        public static object InvokeMethodByHeader(IServiceProvider serviceProvider,MethodInfo methodInfo,Type service,[Optional] List<object>? parameters)
+        public static object InvokeMethodByHeader(IServiceProvider serviceProvider,MethodInfo methodInfo,Type service,object? parameter)
         {
             ServiceLifetime lifetime = GetServiceLifetime(service,serviceProvider);
-            if(parameters!=null)
+            if(parameter!=null)
             {
                 if(lifetime==ServiceLifetime.Scoped)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetScopedService(serviceProvider,service), parameters);
+                    return InvokeMethodWithParameters( methodInfo, GetScopedService(serviceProvider,service), parameter);
                 }
                 else if(lifetime==ServiceLifetime.Singleton)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetSingletonService(serviceProvider,service), parameters);
+                    return InvokeMethodWithParameters( methodInfo, GetSingletonService(serviceProvider,service), parameter);
                 }
                 else if(lifetime==ServiceLifetime.Transient)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetTransientService(serviceProvider,service), parameters);
+                    return InvokeMethodWithParameters( methodInfo, GetTransientService(serviceProvider,service), parameter);
                 }
             }
             if(lifetime==ServiceLifetime.Scoped)
@@ -66,7 +66,7 @@ namespace Autumn.Kafka.Utils
             throw new InvokeMethodException("Method invocation failed");
         }
 
-        private static object InvokeMethodWithParameters(MethodInfo method, object serviceInstance, List<object> parameters)
+        private static object InvokeMethodWithParameters(MethodInfo method, object serviceInstance, object parameter)
         {
 
             if (method.GetParameters().Length == 0)
@@ -76,12 +76,12 @@ namespace Autumn.Kafka.Utils
 
             if (method.ReturnType == typeof(void))
             {
-                method.Invoke(serviceInstance, parameters.ToArray());
+                method.Invoke(serviceInstance, new [] { parameter });
                 return true;
             }
             else
             {
-                var result = method.Invoke(serviceInstance, parameters.ToArray());
+                var result = method.Invoke(serviceInstance, new [] { parameter });
                 if (result != null)
                 {
                     return result;
@@ -92,7 +92,6 @@ namespace Autumn.Kafka.Utils
         private static ServiceLifetime GetServiceLifetime(Type service, IServiceProvider serviceProvider)
         {
             var serviceCollection = (serviceProvider as IServiceProvider)?.GetService(typeof(IServiceCollection)) as IServiceCollection;
-
             if (serviceCollection != null)
             {
                 var serviceType = serviceCollection.FirstOrDefault(x=>x.ServiceType==service);
@@ -107,18 +106,17 @@ namespace Autumn.Kafka.Utils
         {
             using (var scope = serviceProvider.CreateScope())
             {
-                var serviceInstance = scope.ServiceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault());
+                var serviceInstance = scope.ServiceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetScopedServiceException("Failed to get scoped service"));
                 if (serviceInstance != null)
                 {
                     return serviceInstance;
                 }
             }
             throw new GetScopedServiceException("Failed to get scoped service");
-
         }
         private static object GetSingletonService(IServiceProvider serviceProvider, Type serviceType)
         {
-            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault());
+            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetSingletonServiceException("Failed to get singleton service"));
             if (serviceInstance != null)
             {
                 return serviceInstance;
@@ -127,7 +125,7 @@ namespace Autumn.Kafka.Utils
         }
         private static object GetTransientService(IServiceProvider serviceProvider, Type serviceType)
         {
-            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault());
+            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetTransientServiceException("Failed to get transient service"));
             if (serviceInstance != null)
             {
                 return serviceInstance;
@@ -146,6 +144,5 @@ namespace Autumn.Kafka.Utils
             .Where(m => m.GetCustomAttributes(attributeType, false).Any());
             return new HashSet<MethodInfo>(methods);
         }
-
     }
 }

@@ -10,6 +10,6 @@ namespace Autumn.Kafka.Utils.Models
     {
         public Type Service { get; set; } = null!;
         public MethodInfo Method { get; set; } = null!;
-        public ParameterInfo[]? Parameters { get; set; }
+        public ParameterInfo? Parameter { get; set; }
     }
 }

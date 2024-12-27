@@ -7,6 +7,6 @@ namespace Autumn.Kafka.Utils.Models
 {
     public class MessageHandlerConfig
     {
-        HashSet<KafkaMethodExecutionConfig> kafkaMethodExecutionConfigs {get;set;} = null!;
+        public HashSet<KafkaMethodExecutionConfig> kafkaMethodExecutionConfigs {get;set;} = null!;
     }
 }
