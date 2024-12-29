@@ -5,9 +5,8 @@ using System.Threading.Tasks;
 
 namespace Autumn.Kafka.MessageHandlers
 {
-    //TODO: write factory for Message handlers
-    public class MessageHandlerFactory
+    public abstract class MessageHandler
     {
-        
+        public abstract Task Consume();
     }
 }
