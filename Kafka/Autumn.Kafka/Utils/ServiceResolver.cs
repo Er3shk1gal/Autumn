@@ -4,7 +4,10 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Autumn.Kafka.Attributes.MethodAttributes;
+using Autumn.Kafka.Attributes.ServiceAttributes;
 using Autumn.Kafka.Exceptions.ReflectionExceptions;
+using Autumn.Kafka.Utils.Models;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Autumn.Kafka.Utils
@@ -132,17 +135,84 @@ namespace Autumn.Kafka.Utils
             }
             throw new GetTransientServiceException("Failed to get transient service");
         }
-        public static HashSet<Type> GetServicesByAttribute(Type attributeType)
+        public static IEnumerable<IGrouping<TopicConfig, Type>> GetKafkaServices()
         {
-            var serviceClasses = Assembly.GetExecutingAssembly().GetTypes()
-            .Where(t => t.GetCustomAttributes(attributeType, false).Any());
-            return new HashSet<Type>(serviceClasses);
+            return Assembly.GetExecutingAssembly().GetTypes()
+                .Where(t => t.GetCustomAttribute(typeof(KafkaServiceAttribute), false)!=null)
+                .GroupBy(t =>
+                    ((KafkaServiceAttribute)t.GetCustomAttribute(typeof(KafkaServiceAttribute), false)!).RequestTopicConfig);
+
         }
-        public static HashSet<MethodInfo> GetMethodsByAttribute(Type attributeType, Type serviceType)
+
+        public static IEnumerable<IGrouping<TopicConfig, Type>> GetSimpleKafkaServices()
+        {
+            return Assembly.GetExecutingAssembly().GetTypes()
+                .Where(t => t.GetCustomAttribute(typeof(KafkaSimpleServiceAttribute), false)!=null)
+                .GroupBy(t =>
+                    ((KafkaSimpleServiceAttribute)t.GetCustomAttribute(typeof(KafkaSimpleServiceAttribute), false)!).RequestTopic);
+        }
+        private static IEnumerable<MethodInfo> GetMethodsByAttribute(Type attributeType, Type serviceType)
         {
             var methods = serviceType.GetMethods()
             .Where(m => m.GetCustomAttributes(attributeType, false).Any());
             return new HashSet<MethodInfo>(methods);
+        }
+
+        private static IEnumerable<MessageHandlerConfig> X()
+        {
+            IEnumerable<IGrouping<TopicConfig, Type>> kafkaServices = ServiceResolver.GetKafkaServices();
+            IEnumerable<IGrouping<TopicConfig, Type>> simpleKafkaService = ServiceResolver.GetSimpleKafkaServices();
+
+           
+            var combinedGroups = kafkaServices
+                .Select(g => new { TopicConfig = g.Key, Types = g.ToList() })
+                .Concat(simpleKafkaService.Select(g => new { TopicConfig = g.Key, Types = g.ToList() }));
+
+            var finalGrouped = combinedGroups
+                .GroupBy(g => g.TopicConfig)
+                .Select(g => new
+                {
+                    TopicConfig = g.Key,
+                    Types = g.SelectMany(x => x.Types).ToList()
+                });
+            var result = finalGrouped
+                .Select(group => new
+                {
+                    TopicConfig = group.TopicConfig, 
+                    MethodInfoDictionary = group.Types
+                        .Distinct() 
+                        .ToDictionary(
+                            type => type,
+                            type => type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+                                .Where(method => method.GetCustomAttributes(typeof(KafkaMethodAttribute), false).Any() ||
+                                                 method.GetCustomAttributes(typeof(KafkaSimpleMethodAttribute), false).Any())
+                                .ToList()
+                        )
+                });
+            IEnumerable<MessageHandlerConfig> configs = new List<MessageHandlerConfig>();
+            foreach (var topic in result)
+            {
+                MessageHandlerConfig config = new MessageHandlerConfig();
+                
+                foreach (var service in topic.MethodInfoDictionary)
+                {
+                    List<KafkaMethodExecutionConfig> kafkaMethodExecutionConfigs =
+                        new List<KafkaMethodExecutionConfig>();
+                    foreach (var method in service.Value)
+                    {
+                        string kafkaServiceName = service.Key.
+                        kafkaMethodExecutionConfigs.Add( new KafkaMethodExecutionConfig
+                        {
+                            KafkaMethodName = null,
+                            ServiceMethodPair = null,
+                            RequireResponse = false,
+                            responseTopicConfig = null,
+                            responseTopicPartition = null,
+                            KafkaServiceName = 
+                        });
+                    }
+                }
+            }
         }
     }
 }

@@ -17,14 +17,16 @@ namespace Autumn.Kafka.Attributes.ServiceAttributes
     [AttributeUsage(AttributeTargets.Class)]
     public class KafkaSimpleServiceAttribute : Attribute
     {
-        public TopicConfig _requestTopic { get; set; }
-        public TopicConfig? _responseTopic { get; set; }
-        public MessageHandlerType _messageHandlerType { get; set; }
-        public KafkaSimpleServiceAttribute(TopicConfig requestTopic, MessageHandlerType messageHandlerType, TopicConfig? responseTopic = null)
+        public TopicConfig RequestTopic { get; set; }
+        public TopicConfig? ResponseTopic { get; set; }
+        public string KafkaServiceMethod { get; set; }
+        public MessageHandlerType MessageHandlerType { get; set; }
+        public KafkaSimpleServiceAttribute(TopicConfig requestTopic, MessageHandlerType messageHandlerType, string kafkaServiceMethod, TopicConfig? responseTopic = null)
         {
-            _requestTopic = requestTopic;
-            _responseTopic = responseTopic;
-            _messageHandlerType = messageHandlerType;
+            RequestTopic = requestTopic;
+            ResponseTopic = responseTopic;
+            MessageHandlerType = messageHandlerType;
+            KafkaServiceMethod = kafkaServiceMethod;
         }
     }
 }

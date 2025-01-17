@@ -15,14 +15,16 @@ namespace Autumn.Kafka.Attributes.ServiceAttributes
     [AttributeUsage(AttributeTargets.Class)]
     public class KafkaServiceAttribute : Attribute
     {
-        public TopicConfig _requestTopicConfig { get; set; }
-        public TopicConfig? _responseTopicConfig { get; set;}
-        public MessageHandlerType _messageHandlerType { get; set; }
-        public KafkaServiceAttribute(TopicConfig requestTopicConfig, MessageHandlerType messageHandlerType, TopicConfig? responseTopicConfig = null)
+        public TopicConfig RequestTopicConfig { get; set; }
+        public TopicConfig? ResponseTopicConfig { get; set;}
+        public string KafkaServiceName { get; set; }
+        public MessageHandlerType MessageHandlerType { get; set; }
+        public KafkaServiceAttribute(TopicConfig requestTopicConfig, MessageHandlerType messageHandlerType, string kafkaServiceName, TopicConfig? responseTopicConfig = null)
         {
-            _requestTopicConfig = requestTopicConfig;
-            _responseTopicConfig = responseTopicConfig;
-            _messageHandlerType = messageHandlerType;
+            RequestTopicConfig = requestTopicConfig;
+            ResponseTopicConfig = responseTopicConfig;
+            MessageHandlerType = messageHandlerType;
+            KafkaServiceName = kafkaServiceName;
         }
     }
 }
