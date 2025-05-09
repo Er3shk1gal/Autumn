@@ -15,16 +15,36 @@ namespace Autumn.Kafka.Attributes.ServiceAttributes
     [AttributeUsage(AttributeTargets.Class)]
     public class KafkaServiceAttribute : Attribute
     {
-        public TopicConfig RequestTopicConfig { get; set; }
-        public TopicConfig? ResponseTopicConfig { get; set;}
-        public string KafkaServiceName { get; set; }
-        public MessageHandlerType MessageHandlerType { get; set; }
-        public KafkaServiceAttribute(TopicConfig requestTopicConfig, MessageHandlerType messageHandlerType, string kafkaServiceName, TopicConfig? responseTopicConfig = null)
+        #region Fields
+        
+        private readonly TopicConfig _requestTopicConfig;
+        private readonly MessageHandlerType _messageHandlerType;
+        private readonly string _kafkaServiceName;
+        private readonly TopicConfig? _responseTopicConfig;
+            
+        #endregion
+
+        #region Properties
+        
+        public TopicConfig RequestTopicConfig => _requestTopicConfig;
+        public TopicConfig? ResponseTopicConfig => _responseTopicConfig;
+        public string KafkaServiceName => _kafkaServiceName;
+        public MessageHandlerType MessageHandlerType => _messageHandlerType;
+        
+        #endregion
+        
+        #region Constructor
+        
+        public KafkaServiceAttribute(TopicConfig requestTopicConfig, MessageHandlerType messageHandlerType, string kafkaServiceName, int responsePartition, TopicConfig? responseTopicConfig = null)
         {
-            RequestTopicConfig = requestTopicConfig;
-            ResponseTopicConfig = responseTopicConfig;
-            MessageHandlerType = messageHandlerType;
-            KafkaServiceName = kafkaServiceName;
+            _requestTopicConfig = requestTopicConfig;
+            _responseTopicConfig = responseTopicConfig;
+            _messageHandlerType = messageHandlerType;
+            _kafkaServiceName = kafkaServiceName;
         }
+        
+        #endregion
+
+    
     }
 }

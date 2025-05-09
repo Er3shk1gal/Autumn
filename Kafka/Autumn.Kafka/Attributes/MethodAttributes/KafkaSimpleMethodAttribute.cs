@@ -11,12 +11,34 @@ namespace Autumn.Kafka.Attributes.MethodAttributes
     [AttributeUsage(AttributeTargets.Method)]
     public class KafkaSimpleMethodAttribute : Attribute
     {
-        public string _methodName { get; set; } = null!;
-        public bool _requiresResponse { get; set; }
+
+        #region Fields
+        
+        private readonly string _methodName;
+        private readonly bool _requiresResponse;
+
+        #endregion
+
+        #region Properties
+
+        /// <summary>
+        /// Name of the method to be called
+        /// </summary>
+        public string MethodName => _methodName;
+
+        /// <summary>
+        /// If true, the handler should return a response
+        /// </summary>
+        public bool RequiresResponse => _requiresResponse;
+        
+        #endregion
+        
         public KafkaSimpleMethodAttribute(string methodName, bool requiresResponse)
         {
             _methodName = methodName;
             _requiresResponse = requiresResponse;
         }
+        
+        
     }
 }

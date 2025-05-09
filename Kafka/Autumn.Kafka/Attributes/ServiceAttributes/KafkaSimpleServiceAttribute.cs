@@ -17,16 +17,37 @@ namespace Autumn.Kafka.Attributes.ServiceAttributes
     [AttributeUsage(AttributeTargets.Class)]
     public class KafkaSimpleServiceAttribute : Attribute
     {
-        public TopicConfig RequestTopic { get; set; }
-        public TopicConfig? ResponseTopic { get; set; }
-        public string KafkaServiceMethod { get; set; }
-        public MessageHandlerType MessageHandlerType { get; set; }
-        public KafkaSimpleServiceAttribute(TopicConfig requestTopic, MessageHandlerType messageHandlerType, string kafkaServiceMethod, TopicConfig? responseTopic = null)
+        #region Fields
+        
+        private readonly TopicConfig _requestTopic;
+        private readonly TopicConfig? _responseTopic;
+        private readonly string _kafkaServiceName;
+        private readonly MessageHandlerType _messageHandlerType;
+        private readonly int _responsePartition; 
+        
+        #endregion
+        
+        
+        #region Properties
+
+        public TopicConfig RequestTopic => _requestTopic;
+        public TopicConfig? ResponseTopic => _responseTopic;
+        public string KafkaServiceName => _kafkaServiceName;
+        public MessageHandlerType MessageHandlerType => _messageHandlerType;
+        public int ResponsePartition => _responsePartition;
+        
+        #endregion
+        #region Constructor
+        
+        public KafkaSimpleServiceAttribute(TopicConfig requestTopic, MessageHandlerType messageHandlerType, string kafkaServiceName, int responsePartition, TopicConfig? responseTopic = null)
         {
-            RequestTopic = requestTopic;
-            ResponseTopic = responseTopic;
-            MessageHandlerType = messageHandlerType;
-            KafkaServiceMethod = kafkaServiceMethod;
+            _requestTopic = requestTopic;
+            _responseTopic = responseTopic;
+            _messageHandlerType = messageHandlerType;
+            _kafkaServiceName = kafkaServiceName;
+            _responsePartition = responsePartition;
         }
+        
+        #endregion
     }
 }

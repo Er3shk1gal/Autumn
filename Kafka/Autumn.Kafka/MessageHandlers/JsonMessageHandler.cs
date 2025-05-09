@@ -12,7 +12,6 @@ namespace Autumn.Kafka.MessageHandlers
     public class JsonMessageHandler(
         KafkaProducer producer,
         IConsumer<string, string> consumer,
-        TopicConfig requestTopicConfig,
         MessageHandlerConfig messageHandlerConfig,
         ILogger<JsonMessageHandler> logger,
         IServiceProvider serviceProvider)
@@ -50,9 +49,9 @@ namespace Autumn.Kafka.MessageHandlers
         private List<TopicPartition> GetPartitions()
         {
             var partitions = new List<TopicPartition>();
-            for (int partition = 0; partition < requestTopicConfig.PartitionsCount; partition++)
+            for (int partition = 0; partition < messageHandlerConfig.RequestTopicConfig.PartitionsCount; partition++)
             {
-                partitions.Add(new TopicPartition(requestTopicConfig.TopicName, partition));
+                partitions.Add(new TopicPartition(messageHandlerConfig.RequestTopicConfig.TopicName, partition));
             }
             return partitions;
         }
@@ -67,10 +66,14 @@ namespace Autumn.Kafka.MessageHandlers
                 {
                     KafkaMethodExecutionConfig config = messageHandlerConfig.kafkaMethodExecutionConfigs.FirstOrDefault(x=>x.KafkaMethodName.Equals(methodString)) ?? throw new MethodInvalidException("Invalid method name");
                     object result;
-                    if(config.ServiceMethodPair.Parameter!=null)
+                    if(config.ServiceMethodPair.Parameters!=null)
                     {
-                        Type type =config.ServiceMethodPair.Parameter.GetType();
-                        result = ServiceResolver.InvokeMethodByHeader(serviceProvider, config.ServiceMethodPair.Method, config.ServiceMethodPair.Service, JsonConvert.DeserializeObject(message.Message.Value, type));
+                        List<object> parameters = new List<object>();
+                        foreach (var parameter in config.ServiceMethodPair.Parameters)
+                        {
+                            parameters.Add( JsonConvert.DeserializeObject(message.Message.Value,parameter.GetType()));
+                        }
+                        result = ServiceResolver.InvokeMethodByHeader(serviceProvider, config.ServiceMethodPair.Method, config.ServiceMethodPair.Service,parameters);
                     }
                     else
                     {

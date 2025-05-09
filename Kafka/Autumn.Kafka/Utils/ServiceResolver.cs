@@ -14,22 +14,22 @@ namespace Autumn.Kafka.Utils
 {
     public static class ServiceResolver
     {
-        public static object InvokeMethodByHeader(IServiceProvider serviceProvider,MethodInfo methodInfo,Type service,object? parameter)
+        public static object InvokeMethodByHeader(IServiceProvider serviceProvider,MethodInfo methodInfo,Type service,IEnumerable<object>? parameters)
         {
             ServiceLifetime lifetime = GetServiceLifetime(service,serviceProvider);
-            if(parameter!=null)
+            if(parameters!=null)
             {
                 if(lifetime==ServiceLifetime.Scoped)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetScopedService(serviceProvider,service), parameter);
+                    return InvokeMethodWithParameters( methodInfo, GetScopedService(serviceProvider,service), parameters);
                 }
                 else if(lifetime==ServiceLifetime.Singleton)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetSingletonService(serviceProvider,service), parameter);
+                    return InvokeMethodWithParameters( methodInfo, GetSingletonService(serviceProvider,service), parameters);
                 }
                 else if(lifetime==ServiceLifetime.Transient)
                 {
-                    return InvokeMethodWithParameters( methodInfo, GetTransientService(serviceProvider,service), parameter);
+                    return InvokeMethodWithParameters( methodInfo, GetTransientService(serviceProvider,service), parameters);
                 }
             }
             if(lifetime==ServiceLifetime.Scoped)
@@ -69,7 +69,7 @@ namespace Autumn.Kafka.Utils
             throw new InvokeMethodException("Method invocation failed");
         }
 
-        private static object InvokeMethodWithParameters(MethodInfo method, object serviceInstance, object parameter)
+        private static object InvokeMethodWithParameters(MethodInfo method, object serviceInstance, IEnumerable<object> parameters)
         {
 
             if (method.GetParameters().Length == 0)
@@ -79,12 +79,12 @@ namespace Autumn.Kafka.Utils
 
             if (method.ReturnType == typeof(void))
             {
-                method.Invoke(serviceInstance, new [] { parameter });
+                method.Invoke(serviceInstance,  parameters.ToArray() );
                 return true;
             }
             else
             {
-                var result = method.Invoke(serviceInstance, new [] { parameter });
+                var result = method.Invoke(serviceInstance,parameters.ToArray());
                 if (result != null)
                 {
                     return result;
@@ -158,61 +158,6 @@ namespace Autumn.Kafka.Utils
             return new HashSet<MethodInfo>(methods);
         }
 
-        private static IEnumerable<MessageHandlerConfig> X()
-        {
-            IEnumerable<IGrouping<TopicConfig, Type>> kafkaServices = ServiceResolver.GetKafkaServices();
-            IEnumerable<IGrouping<TopicConfig, Type>> simpleKafkaService = ServiceResolver.GetSimpleKafkaServices();
-
-           
-            var combinedGroups = kafkaServices
-                .Select(g => new { TopicConfig = g.Key, Types = g.ToList() })
-                .Concat(simpleKafkaService.Select(g => new { TopicConfig = g.Key, Types = g.ToList() }));
-
-            var finalGrouped = combinedGroups
-                .GroupBy(g => g.TopicConfig)
-                .Select(g => new
-                {
-                    TopicConfig = g.Key,
-                    Types = g.SelectMany(x => x.Types).ToList()
-                });
-            var result = finalGrouped
-                .Select(group => new
-                {
-                    TopicConfig = group.TopicConfig, 
-                    MethodInfoDictionary = group.Types
-                        .Distinct() 
-                        .ToDictionary(
-                            type => type,
-                            type => type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
-                                .Where(method => method.GetCustomAttributes(typeof(KafkaMethodAttribute), false).Any() ||
-                                                 method.GetCustomAttributes(typeof(KafkaSimpleMethodAttribute), false).Any())
-                                .ToList()
-                        )
-                });
-            IEnumerable<MessageHandlerConfig> configs = new List<MessageHandlerConfig>();
-            foreach (var topic in result)
-            {
-                MessageHandlerConfig config = new MessageHandlerConfig();
-                
-                foreach (var service in topic.MethodInfoDictionary)
-                {
-                    List<KafkaMethodExecutionConfig> kafkaMethodExecutionConfigs =
-                        new List<KafkaMethodExecutionConfig>();
-                    foreach (var method in service.Value)
-                    {
-                        string kafkaServiceName = service.Key.
-                        kafkaMethodExecutionConfigs.Add( new KafkaMethodExecutionConfig
-                        {
-                            KafkaMethodName = null,
-                            ServiceMethodPair = null,
-                            RequireResponse = false,
-                            responseTopicConfig = null,
-                            responseTopicPartition = null,
-                            KafkaServiceName = 
-                        });
-                    }
-                }
-            }
-        }
+       
     }
 }

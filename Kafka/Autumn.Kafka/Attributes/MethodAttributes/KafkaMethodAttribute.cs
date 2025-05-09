@@ -12,9 +12,33 @@ namespace Autumn.Kafka.Attributes.MethodAttributes
     [AttributeUsage(AttributeTargets.Method)]
     public class KafkaMethodAttribute : Attribute
     {
-        public string _methodName { get; set; } = null!;
-        public int _partition { get; set; }
-        public bool _requiresResponse { get; set; }
+        #region Fields
+
+        private readonly string _methodName;
+        private readonly int _partition;
+        private readonly bool _requiresResponse;
+
+        #endregion
+
+
+        #region Properties
+
+        /// <summary>
+        /// Name of the kafka method
+        /// </summary>
+        public string MethodName => _methodName;
+
+        /// <summary>
+        /// Partition for the kafka consumer
+        /// </summary>
+        public int Partition => _partition;
+
+        /// <summary>
+        /// Requires a response
+        /// </summary>
+        public bool RequiresResponse => _requiresResponse;
+        
+        #endregion
         public KafkaMethodAttribute(string methodName, int partition, bool requiresResponse)
         {
             _methodName = methodName;
