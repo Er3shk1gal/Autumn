@@ -1,163 +1,105 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Threading.Tasks;
-using Autumn.Kafka.Attributes.MethodAttributes;
-using Autumn.Kafka.Attributes.ServiceAttributes;
-using Autumn.Kafka.Exceptions.ReflectionExceptions;
+using Autumn.Kafka.Attributes;
+using Autumn.Kafka.Exceptions;
 using Autumn.Kafka.Utils.Models;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace Autumn.Kafka.Utils
 {
+    /// <summary>
+    /// Resolves service instances from DI and invokes methods via reflection.
+    /// </summary>
     public static class ServiceResolver
     {
-        public static object InvokeMethodByHeader(IServiceProvider serviceProvider,MethodInfo methodInfo,Type service,IEnumerable<object>? parameters)
+        /// <summary>
+        /// Resolves the service from DI and invokes the specified method.
+        /// </summary>
+        public static object InvokeMethod(
+            IServiceProvider serviceProvider,
+            MethodInfo methodInfo,
+            Type serviceType,
+            IEnumerable<object>? parameters)
         {
-            ServiceLifetime lifetime = GetServiceLifetime(service,serviceProvider);
-            if(parameters!=null)
-            {
-                if(lifetime==ServiceLifetime.Scoped)
-                {
-                    return InvokeMethodWithParameters( methodInfo, GetScopedService(serviceProvider,service), parameters);
-                }
-                else if(lifetime==ServiceLifetime.Singleton)
-                {
-                    return InvokeMethodWithParameters( methodInfo, GetSingletonService(serviceProvider,service), parameters);
-                }
-                else if(lifetime==ServiceLifetime.Transient)
-                {
-                    return InvokeMethodWithParameters( methodInfo, GetTransientService(serviceProvider,service), parameters);
-                }
-            }
-            if(lifetime==ServiceLifetime.Scoped)
-            {
-                return InvokeMethodWithoutParameters( methodInfo, GetScopedService(serviceProvider,service));
-            }
-            else if(lifetime==ServiceLifetime.Singleton)
-            {
-                return InvokeMethodWithoutParameters( methodInfo, GetSingletonService(serviceProvider,service));
-            }
-            else if(lifetime==ServiceLifetime.Transient)
-            {
-                return InvokeMethodWithoutParameters( methodInfo, GetTransientService(serviceProvider,service));
-            }
-            throw new InvokeMethodException("Failed to invoke method");
-        }
-        private static object InvokeMethodWithoutParameters(MethodInfo method,object serviceInstance)
-        {
-            if (method.GetParameters().Length != 0)
-            {
-                throw new InvokeMethodException("Wrong method implementation: method should not have parameters.");
-            }
-
-            if (method.ReturnType == typeof(void))
-            {
-                method.Invoke(serviceInstance, null);
-                return true;
-            }
-            else
-            {
-                var result = method.Invoke(serviceInstance, null);
-                if (result != null)
-                {
-                    return result;
-                }
-            }
-            throw new InvokeMethodException("Method invocation failed");
+            var serviceInstance = ResolveService(serviceProvider, serviceType);
+            return InvokeMethodOnInstance(methodInfo, serviceInstance, parameters);
         }
 
-        private static object InvokeMethodWithParameters(MethodInfo method, object serviceInstance, IEnumerable<object> parameters)
+        private static object InvokeMethodOnInstance(
+            MethodInfo method,
+            object serviceInstance,
+            IEnumerable<object>? parameters)
         {
+            var methodParams = method.GetParameters();
+            var hasParameters = parameters != null && parameters.Any();
 
-            if (method.GetParameters().Length == 0)
+            if (hasParameters && methodParams.Length == 0)
             {
-                throw new InvokeMethodException("Wrong method implementation: method should have parameters.");
+                throw new KafkaServiceResolutionException(
+                    $"Method '{method.Name}' does not accept parameters, but parameters were provided.");
             }
 
-            if (method.ReturnType == typeof(void))
+            if (!hasParameters && methodParams.Length > 0)
             {
-                method.Invoke(serviceInstance,  parameters.ToArray() );
-                return true;
+                throw new KafkaServiceResolutionException(
+                    $"Method '{method.Name}' requires {methodParams.Length} parameter(s), but none were provided.");
             }
-            else
+
+            try
             {
-                var result = method.Invoke(serviceInstance,parameters.ToArray());
-                if (result != null)
+                var args = hasParameters ? parameters!.ToArray() : null;
+
+                if (method.ReturnType == typeof(void))
                 {
-                    return result;
+                    method.Invoke(serviceInstance, args);
+                    return true;
+                }
+
+                var result = method.Invoke(serviceInstance, args);
+                return result ?? true;
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                // Unwrap reflection wrapper to expose the actual exception
+                throw new KafkaServiceResolutionException(
+                    $"Method '{method.Name}' threw an exception: {ex.InnerException.Message}",
+                    ex.InnerException);
+            }
+        }
+
+        /// <summary>
+        /// Resolves a service instance from the DI container.
+        /// </summary>
+        private static object ResolveService(IServiceProvider serviceProvider, Type serviceType)
+        {
+            // Try to resolve by the concrete type
+            var service = serviceProvider.GetService(serviceType);
+            if (service != null)
+            {
+                return service;
+            }
+
+            // Try to resolve by the first implemented interface
+            var interfaceType = serviceType.GetInterfaces().FirstOrDefault();
+            if (interfaceType != null)
+            {
+                service = serviceProvider.GetService(interfaceType);
+                if (service != null)
+                {
+                    return service;
                 }
             }
-            throw new InvokeMethodException("Method invocation failed");
-        }
-        private static ServiceLifetime GetServiceLifetime(Type service, IServiceProvider serviceProvider)
-        {
-            var serviceCollection = (serviceProvider as IServiceProvider)?.GetService(typeof(IServiceCollection)) as IServiceCollection;
-            if (serviceCollection != null)
-            {
-                var serviceType = serviceCollection.FirstOrDefault(x=>x.ServiceType==service);
-                if(serviceType != null)
-                {
-                    return serviceType.Lifetime;
-                }
-            }
-            throw new GetServiceLifetimeException("Failed to get service lifetime");
-        }
-        private static object GetScopedService(IServiceProvider serviceProvider, Type serviceType)
-        {
-            using (var scope = serviceProvider.CreateScope())
-            {
-                var serviceInstance = scope.ServiceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetScopedServiceException("Failed to get scoped service"));
-                if (serviceInstance != null)
-                {
-                    return serviceInstance;
-                }
-            }
-            throw new GetScopedServiceException("Failed to get scoped service");
-        }
-        private static object GetSingletonService(IServiceProvider serviceProvider, Type serviceType)
-        {
-            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetSingletonServiceException("Failed to get singleton service"));
-            if (serviceInstance != null)
-            {
-                return serviceInstance;
-            }
-            throw new GetSingletonServiceException("Failed to get singleton service");
-        }
-        private static object GetTransientService(IServiceProvider serviceProvider, Type serviceType)
-        {
-            var serviceInstance = serviceProvider.GetRequiredService(serviceType.GetInterfaces().FirstOrDefault() ?? throw new GetTransientServiceException("Failed to get transient service"));
-            if (serviceInstance != null)
-            {
-                return serviceInstance;
-            }
-            throw new GetTransientServiceException("Failed to get transient service");
-        }
-        public static IEnumerable<IGrouping<TopicConfig, Type>> GetKafkaServices()
-        {
-            return Assembly.GetExecutingAssembly().GetTypes()
-                .Where(t => t.GetCustomAttribute(typeof(KafkaServiceAttribute), false)!=null)
-                .GroupBy(t =>
-                    ((KafkaServiceAttribute)t.GetCustomAttribute(typeof(KafkaServiceAttribute), false)!).RequestTopicConfig);
 
+            throw new KafkaServiceResolutionException(
+                $"Failed to resolve service '{serviceType.Name}' from the DI container. " +
+                "Ensure the service is registered in your DI configuration.");
         }
 
-        public static IEnumerable<IGrouping<TopicConfig, Type>> GetSimpleKafkaServices()
+        /// <summary>
+        /// Scans the specified assembly for classes decorated with <see cref="KafkaServiceAttribute"/>.
+        /// </summary>
+        public static IEnumerable<Type> GetKafkaServiceTypes(Assembly assembly)
         {
-            return Assembly.GetExecutingAssembly().GetTypes()
-                .Where(t => t.GetCustomAttribute(typeof(KafkaSimpleServiceAttribute), false)!=null)
-                .GroupBy(t =>
-                    ((KafkaSimpleServiceAttribute)t.GetCustomAttribute(typeof(KafkaSimpleServiceAttribute), false)!).RequestTopic);
+            return assembly.GetTypes()
+                .Where(t => t.GetCustomAttribute<KafkaServiceAttribute>() != null);
         }
-        private static IEnumerable<MethodInfo> GetMethodsByAttribute(Type attributeType, Type serviceType)
-        {
-            var methods = serviceType.GetMethods()
-            .Where(m => m.GetCustomAttributes(attributeType, false).Any());
-            return new HashSet<MethodInfo>(methods);
-        }
-
-       
     }
 }

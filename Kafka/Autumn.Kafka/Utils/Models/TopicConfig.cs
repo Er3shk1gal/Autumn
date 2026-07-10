@@ -1,14 +1,12 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-
 namespace Autumn.Kafka.Utils.Models
 {
+    /// <summary>
+    /// Kafka topic configuration — name, partitions, replication.
+    /// </summary>
     public class TopicConfig
     {
         public string TopicName { get; set; } = null!;
-        public int PartitionsCount {get;set;}
-        public short ReplicationFactor {get;set;} = 1;
+        public int PartitionsCount { get; set; } = 1;
+        public short ReplicationFactor { get; set; } = 1;
     }
 }

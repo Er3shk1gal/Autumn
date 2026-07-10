@@ -1,10 +1,7 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
-using Autumn.Kafka.Attributes.MethodAttributes;
-using Autumn.Kafka.Attributes.ServiceAttributes;
+using Autumn.Kafka.Attributes;
+using Autumn.Kafka.Configuration;
+using Autumn.Kafka.Exceptions;
 using Autumn.Kafka.Utils;
 using Autumn.Kafka.Utils.Models;
 using Confluent.Kafka;
@@ -13,128 +10,142 @@ using Microsoft.Extensions.Logging;
 
 namespace Autumn.Kafka.MessageHandlers;
 
-//TODO: write factory for Message handlers
-public class MessageHandlerFactory
+/// <summary>
+/// Scans assemblies for <see cref="KafkaServiceAttribute"/> classes and creates
+/// corresponding <see cref="MessageHandler"/> instances.
+/// </summary>
+public static class MessageHandlerFactory
 {
-    //TODO: Add 
-    public static IEnumerable<MessageHandler> CreateHandlers(IServiceProvider serviceProvider)
+    /// <summary>
+    /// Creates message handlers for all discovered Kafka services.
+    /// </summary>
+    /// <param name="serviceProvider">The application's service provider.</param>
+    /// <param name="targetAssembly">The assembly to scan. If null, scans the entry assembly.</param>
+    public static IEnumerable<MessageHandler> CreateHandlers(
+        IServiceProvider serviceProvider,
+        Assembly? targetAssembly = null)
     {
-        var handlers = new List<MessageHandler>();
-        var assembly = Assembly.GetExecutingAssembly();
-        
-        var handlerConfigs = CreateKafkaMessageHandlerConfig().ToList();
+        var assembly = targetAssembly
+            ?? Assembly.GetEntryAssembly()
+            ?? throw new KafkaConfigurationException(
+                "Unable to determine entry assembly. Provide the target assembly via AutumnKafkaOptions.ServiceAssembly.");
 
-        var handlerTypes = assembly.GetTypes()
-            .Where(t => typeof(MessageHandler).IsAssignableFrom(t) && 
-                        !t.IsAbstract);
+        var handlerConfigs = BuildHandlerConfigs(assembly).ToList();
 
-        foreach (var type in handlerTypes)
+        if (handlerConfigs.Count == 0)
         {
-            var config = handlerConfigs.FirstOrDefault(c => 
-                c.kafkaMethodExecutionConfigs.Any(k => k.ServiceMethodPair.Service == type));
-                
-            if (config == null)
-            {
-                config = new MessageHandlerConfig()
-                {
-                    RequestTopicConfig = new TopicConfig(),
-                    kafkaMethodExecutionConfigs = new HashSet<KafkaMethodExecutionConfig>()
-                };
-            }
+            return [];
+        }
 
-            var producer = serviceProvider.GetRequiredService<KafkaProducer>();
-            var consumer = serviceProvider.GetRequiredService<IConsumer<string, string>>();
-            var loggerType = typeof(ILogger<>).MakeGenericType(type);
-            var logger = serviceProvider.GetRequiredService(loggerType);
+        var handlers = new List<MessageHandler>();
 
-            var handler = (MessageHandler)ActivatorUtilities.CreateInstance(
-                serviceProvider, 
-                type, 
-                producer, 
-                consumer, 
-                config, 
-                logger, 
-                serviceProvider);
-                
+        foreach (var config in handlerConfigs)
+        {
+            var handler = CreateHandler(config, serviceProvider);
             handlers.Add(handler);
         }
 
         return handlers;
     }
 
-    private static IEnumerable<MessageHandlerConfig> CreateKafkaMessageHandlerConfig()
+    private static MessageHandler CreateHandler(
+        MessageHandlerConfig config,
+        IServiceProvider serviceProvider)
     {
-        var configs = new List<MessageHandlerConfig>();
-        var assembly = Assembly.GetExecutingAssembly();
+        var producer = serviceProvider.GetRequiredService<KafkaProducer>();
+        var consumer = serviceProvider.GetRequiredService<IConsumer<string, string>>();
+        var logger = serviceProvider.GetRequiredService<ILogger<JsonMessageHandler>>();
 
+        return new JsonMessageHandler(producer, consumer, config, logger, serviceProvider);
+    }
+
+    /// <summary>
+    /// Scans the assembly and builds one <see cref="MessageHandlerConfig"/> per unique request topic.
+    /// </summary>
+    public static IEnumerable<MessageHandlerConfig> BuildHandlerConfigs(Assembly assembly)
+    {
         var serviceTypes = assembly.GetTypes()
-            .Where(t => t.GetCustomAttributes<KafkaServiceAttribute>().Any() || 
-                       t.GetCustomAttributes<KafkaSimpleServiceAttribute>().Any());
+            .Where(t => t.GetCustomAttribute<KafkaServiceAttribute>() != null)
+            .ToList();
+
+        if (serviceTypes.Count == 0)
+        {
+            return [];
+        }
+
+        // Group services by request topic — services sharing a topic share a consumer
+        var configsByTopic = new Dictionary<string, MessageHandlerConfig>();
 
         foreach (var serviceType in serviceTypes)
         {
-            var isSimpleService = serviceType.GetCustomAttributes<KafkaSimpleServiceAttribute>().Any();
-            var serviceAttribute = isSimpleService 
-                ? (Attribute)serviceType.GetCustomAttributes<KafkaSimpleServiceAttribute>().First() 
-                : serviceType.GetCustomAttributes<KafkaServiceAttribute>().First();
-         
-            var methods = serviceType.GetMethods()
-                .Where(m => isSimpleService 
-                    ? m.GetCustomAttributes<KafkaSimpleMethodAttribute>().Any()
-                    : m.GetCustomAttributes<KafkaMethodAttribute>().Any());
+            var serviceAttr = serviceType.GetCustomAttribute<KafkaServiceAttribute>()!;
 
-            if (!methods.Any())
+            var methods = serviceType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Where(m => m.GetCustomAttribute<KafkaMethodAttribute>() != null)
+                .ToList();
+
+            if (methods.Count == 0)
             {
-                throw new InvalidOperationException($"Service {serviceType.Name} has no valid Kafka methods");
+                throw new KafkaConfigurationException(
+                    $"Service '{serviceType.Name}' is decorated with [KafkaService] " +
+                    "but has no methods decorated with [KafkaMethod].");
             }
 
-            var methodConfigs = methods.Select(m => 
+            // Get or create the handler config for this topic
+            if (!configsByTopic.TryGetValue(serviceAttr.RequestTopic, out var handlerConfig))
             {
-                var methodAttr = isSimpleService
-                    ? (Attribute)m.GetCustomAttributes<KafkaSimpleMethodAttribute>().First()
-                    : m.GetCustomAttributes<KafkaMethodAttribute>().First();
-
-               var config = new KafkaMethodExecutionConfig();
-
-                if (isSimpleService)
+                handlerConfig = new MessageHandlerConfig
                 {
-                    var simpleAttr = (KafkaSimpleMethodAttribute)methodAttr;
-                    var serviceAttr = (KafkaSimpleServiceAttribute)serviceAttribute;
-                    config.KafkaMethodName = simpleAttr.MethodName;
-                    config.responseTopicConfig = serviceAttr.ResponseTopic;
-                    config.RequireResponse = simpleAttr.RequiresResponse;
-                    config.KafkaServiceName = serviceAttr.KafkaServiceName;
-                    config.responseTopicPartition = serviceAttr.ResponsePartition;
-                    config.ServiceMethodPair = new ServiceMethodPair()
+                    RequestTopicConfig = new TopicConfig
                     {
-                        Service = serviceType,
-                        Method = m,
-                        Parameters = m.GetParameters()
-                    };
-                    
-                }
-                else 
+                        TopicName = serviceAttr.RequestTopic,
+                        PartitionsCount = serviceAttr.RequestPartitions,
+                        ReplicationFactor = serviceAttr.RequestReplicationFactor,
+                    },
+                    KafkaMethodExecutionConfigs = new HashSet<KafkaMethodExecutionConfig>(),
+                };
+                configsByTopic[serviceAttr.RequestTopic] = handlerConfig;
+            }
+
+            // Build execution config for each method
+            foreach (var method in methods)
+            {
+                var methodAttr = method.GetCustomAttribute<KafkaMethodAttribute>()!;
+
+                var responsePartition = methodAttr.ResponsePartition >= 0
+                    ? methodAttr.ResponsePartition
+                    : serviceAttr.DefaultResponsePartition;
+
+                TopicConfig? responseTopicConfig = null;
+                if (serviceAttr.ResponseTopic != null)
                 {
-                    var kafkaMethodAttr = (KafkaMethodAttribute)methodAttr;
-                    var serviceAttr = (KafkaServiceAttribute)serviceAttribute;
-                    config.KafkaMethodName = kafkaMethodAttr.MethodName;
-                    config.responseTopicConfig = serviceAttr.ResponseTopicConfig;
-                    config.responseTopicPartition = kafkaMethodAttr.Partition;
-                    config.RequireResponse = kafkaMethodAttr.RequiresResponse;
-                    config.KafkaServiceName = serviceAttr.KafkaServiceName;
-                    config.ServiceMethodPair = new ServiceMethodPair()
+                    responseTopicConfig = new TopicConfig
                     {
-                        Service = serviceType,
-                        Method = m,
-                        Parameters = m.GetParameters()
+                        TopicName = serviceAttr.ResponseTopic,
+                        PartitionsCount = serviceAttr.ResponsePartitions,
+                        ReplicationFactor = serviceAttr.ResponseReplicationFactor,
                     };
-                    
                 }
 
-                return config;
-            }).ToList();
+                var executionConfig = new KafkaMethodExecutionConfig
+                {
+                    KafkaMethodName = methodAttr.MethodName,
+                    RequireResponse = methodAttr.RequiresResponse,
+                    KafkaServiceName = serviceAttr.ServiceName,
+                    ResponseTopicConfig = responseTopicConfig,
+                    ResponseTopicPartition = responsePartition,
+                    ServiceMethodPair = new ServiceMethodPair
+                    {
+                        Service = serviceType,
+                        Method = method,
+                        Parameters = method.GetParameters(),
+                    },
+                };
+
+                handlerConfig.KafkaMethodExecutionConfigs.Add(executionConfig);
+            }
         }
 
-        return configs;
-    } 
+        return configsByTopic.Values;
+    }
 }

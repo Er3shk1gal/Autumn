@@ -1,6 +1,5 @@
 using System.Text;
-using Autumn.Kafka.Exceptions.ConsumerExceptions;
-using Autumn.Kafka.Exceptions.ProducerExceptions;
+using Autumn.Kafka.Exceptions;
 using Autumn.Kafka.Utils;
 using Autumn.Kafka.Utils.Models;
 using Confluent.Kafka;
@@ -9,6 +8,10 @@ using Newtonsoft.Json;
 
 namespace Autumn.Kafka.MessageHandlers
 {
+    /// <summary>
+    /// Message handler that deserializes JSON messages, routes them by "method" header
+    /// to the appropriate service method, and optionally sends JSON responses.
+    /// </summary>
     public class JsonMessageHandler(
         KafkaProducer producer,
         IConsumer<string, string> consumer,
@@ -17,113 +20,153 @@ namespace Autumn.Kafka.MessageHandlers
         IServiceProvider serviceProvider)
         : MessageHandler
     {
-        public override async Task Consume()
+        public override async Task Consume(CancellationToken cancellationToken = default)
         {
             try
             {
                 consumer.Assign(GetPartitions());
-                while (true)
+                logger.LogInformation("Consumer assigned to topic '{Topic}' with {Count} partition(s)",
+                    messageHandlerConfig.RequestTopicConfig.TopicName,
+                    messageHandlerConfig.RequestTopicConfig.PartitionsCount);
+
+                while (!cancellationToken.IsCancellationRequested)
                 {
                     try
                     {
-                        ConsumeResult<string,string> message = consumer.Consume();
-                        if(await HandleMessage(message))
+                        var consumeResult = consumer.Consume(cancellationToken);
+                        if (consumeResult == null || consumeResult.IsPartitionEOF)
                         {
-                            consumer.Commit();
+                            continue;
                         }
-                        throw new HandleMethodException("0_0");
+
+                        if (await HandleMessage(consumeResult))
+                        {
+                            consumer.Commit(consumeResult);
+                        }
                     }
-                    catch(Exception ex)
+                    catch (OperationCanceledException)
                     {
-                        logger.LogError(ex, ex.Message);
-                        consumer.Commit();
+                        break;
+                    }
+                    catch (ConsumeException ex)
+                    {
+                        logger.LogError(ex, "Kafka consume error on topic '{Topic}'",
+                            messageHandlerConfig.RequestTopicConfig.TopicName);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Error processing message from topic '{Topic}'",
+                            messageHandlerConfig.RequestTopicConfig.TopicName);
                     }
                 }
             }
-            catch (Exception ex)
+            finally
             {
-                logger.LogError(ex, ex.Message);
-                consumer.Commit();
+                consumer.Close();
+                logger.LogInformation("Consumer closed for topic '{Topic}'",
+                    messageHandlerConfig.RequestTopicConfig.TopicName);
             }
         }
+
         private List<TopicPartition> GetPartitions()
         {
             var partitions = new List<TopicPartition>();
-            for (int partition = 0; partition < messageHandlerConfig.RequestTopicConfig.PartitionsCount; partition++)
+            for (int i = 0; i < messageHandlerConfig.RequestTopicConfig.PartitionsCount; i++)
             {
-                partitions.Add(new TopicPartition(messageHandlerConfig.RequestTopicConfig.TopicName, partition));
+                partitions.Add(new TopicPartition(
+                    messageHandlerConfig.RequestTopicConfig.TopicName, i));
             }
             return partitions;
         }
-        private async Task<bool> HandleMessage(ConsumeResult<string,string> message)
+
+        private async Task<bool> HandleMessage(ConsumeResult<string, string> message)
         {
             var headerBytes = message.Message.Headers
-                        .FirstOrDefault(x => x.Key.Equals("method"));
-            if (headerBytes != null)
+                .FirstOrDefault(x => x.Key.Equals("method"));
+
+            if (headerBytes == null)
             {
-                var methodString = Encoding.UTF8.GetString(headerBytes.GetValueBytes());
-                if(messageHandlerConfig.kafkaMethodExecutionConfigs.Any(x=>x.KafkaMethodName.Equals(methodString)))
-                {
-                    KafkaMethodExecutionConfig config = messageHandlerConfig.kafkaMethodExecutionConfigs.FirstOrDefault(x=>x.KafkaMethodName.Equals(methodString)) ?? throw new MethodInvalidException("Invalid method name");
-                    object result;
-                    if(config.ServiceMethodPair.Parameters!=null)
-                    {
-                        List<object> parameters = new List<object>();
-                        foreach (var parameter in config.ServiceMethodPair.Parameters)
-                        {
-                            parameters.Add( JsonConvert.DeserializeObject(message.Message.Value,parameter.GetType()));
-                        }
-                        result = ServiceResolver.InvokeMethodByHeader(serviceProvider, config.ServiceMethodPair.Method, config.ServiceMethodPair.Service,parameters);
-                    }
-                    else
-                    {
-                        result = ServiceResolver.InvokeMethodByHeader(serviceProvider, config.ServiceMethodPair.Method, config.ServiceMethodPair.Service, null);
-                    }
-                    if(config.RequireResponse)
-                    {
-                        if(config.KafkaServiceName!=null)
-                        {
-                            return await SendResponse(config,new Message<string, string>(){
-                            Key = message.Message.Key,
-                                Value = JsonConvert.SerializeObject(result),
-                                Headers = [
-                                    new Header("method",Encoding.UTF8.GetBytes(methodString)),
-                                    new Header("sender",Encoding.UTF8.GetBytes(config.KafkaServiceName))
-                                ]
-                            });
-                        }
-                        return await SendResponse(config,new Message<string, string>(){
-                            Key = message.Message.Key,
-                                Value = JsonConvert.SerializeObject(result),
-                                Headers = [
-                                    new Header("method",Encoding.UTF8.GetBytes(methodString)),
-                                    new Header("sender",Encoding.UTF8.GetBytes(Environment.GetEnvironmentVariable("GLOBAL_SERVICE_NAME") ?? throw new ConfigInvalidException("Invalid config")))
-                                ]
-                            });
-                    }
-                    else
-                    {
-                        return true;
-                    }
-                }
-                throw new MethodInvalidException("Invalid method name");
+                throw new KafkaConsumerException("Message is missing required 'method' header");
             }
-            throw new HeaderBytesNullException("Header bytes are null");
+
+            var methodName = Encoding.UTF8.GetString(headerBytes.GetValueBytes());
+
+            var config = messageHandlerConfig.KafkaMethodExecutionConfigs
+                .FirstOrDefault(x => x.KafkaMethodName.Equals(methodName));
+
+            if (config == null)
+            {
+                throw new KafkaConsumerException($"No handler registered for method '{methodName}'");
+            }
+
+            var result = InvokeServiceMethod(config, message.Message.Value);
+
+            if (!config.RequireResponse)
+            {
+                return true;
+            }
+
+            var senderName = config.KafkaServiceName
+                ?? throw new KafkaConfigurationException(
+                    "KafkaServiceName is not configured for response handling");
+
+            var responseMessage = new Message<string, string>
+            {
+                Key = message.Message.Key,
+                Value = JsonConvert.SerializeObject(result),
+                Headers =
+                [
+                    new Header("method", Encoding.UTF8.GetBytes(methodName)),
+                    new Header("sender", Encoding.UTF8.GetBytes(senderName))
+                ]
+            };
+
+            return await SendResponse(config, responseMessage);
         }
-        private async Task<bool> SendResponse(KafkaMethodExecutionConfig config, Message<string,string> message)
+
+        private object InvokeServiceMethod(KafkaMethodExecutionConfig config, string messageValue)
         {
-            try
+            if (config.ServiceMethodPair.Parameters != null && config.ServiceMethodPair.Parameters.Any())
             {
-                if(config is { responseTopicPartition: not null, responseTopicConfig: not null })
+                var parameters = new List<object>();
+                foreach (var paramInfo in config.ServiceMethodPair.Parameters)
                 {
-                    return await producer.ProduceAsync(config.responseTopicConfig, (int)config.responseTopicPartition, message);
+                    var deserialized = JsonConvert.DeserializeObject(messageValue, paramInfo.ParameterType);
+                    if (deserialized != null)
+                    {
+                        parameters.Add(deserialized);
+                    }
                 }
-                throw new ProducerException("Failed to send response");
+
+                return ServiceResolver.InvokeMethod(
+                    serviceProvider,
+                    config.ServiceMethodPair.Method,
+                    config.ServiceMethodPair.Service,
+                    parameters);
             }
-            catch
+
+            return ServiceResolver.InvokeMethod(
+                serviceProvider,
+                config.ServiceMethodPair.Method,
+                config.ServiceMethodPair.Service,
+                null);
+        }
+
+        private async Task<bool> SendResponse(
+            KafkaMethodExecutionConfig config,
+            Message<string, string> message)
+        {
+            if (config.ResponseTopicConfig == null || config.ResponseTopicPartition == null)
             {
-                return false;
+                throw new KafkaConfigurationException(
+                    $"Response topic is not configured for method '{config.KafkaMethodName}'. " +
+                    "Set ResponseTopic on [KafkaService] attribute.");
             }
+
+            return await producer.ProduceAsync(
+                config.ResponseTopicConfig,
+                (int)config.ResponseTopicPartition,
+                message);
         }
     }
 }

@@ -1,11 +1,11 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
 
 namespace Autumn.Kafka.Utils.Models
 {
+    /// <summary>
+    /// Links a service type to a specific method and its parameter metadata.
+    /// Used internally for reflective method invocation.
+    /// </summary>
     public class ServiceMethodPair
     {
         public Type Service { get; set; } = null!;
