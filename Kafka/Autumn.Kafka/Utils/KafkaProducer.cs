@@ -9,55 +9,44 @@ namespace Autumn.Kafka.Utils
     /// Wraps <see cref="IProducer{TKey,TValue}"/> with topic auto-creation
     /// and structured error handling.
     /// </summary>
-    public class KafkaProducer
+    public class KafkaProducer(
+        IProducer<string, byte[]> producer,
+        ILogger<KafkaProducer> logger,
+        KafkaTopicManager kafkaTopicManager)
     {
-        private readonly IProducer<string, string> _producer;
-        private readonly ILogger<KafkaProducer> _logger;
-        private readonly KafkaTopicManager _kafkaTopicManager;
-
-        public KafkaProducer(
-            IProducer<string, string> producer,
-            ILogger<KafkaProducer> logger,
-            KafkaTopicManager kafkaTopicManager)
-        {
-            _producer = producer;
-            _logger = logger;
-            _kafkaTopicManager = kafkaTopicManager;
-        }
-
-        /// <summary>
-        /// Produces a message to the specified topic and partition.
-        /// Creates the topic automatically if it does not exist.
-        /// </summary>
         public async Task<bool> ProduceAsync(
-            TopicConfig topic, int partition, Message<string, string> message)
+            TopicConfig topic, int partition, Message<string, byte[]> message)
         {
             try
             {
                 await EnsureTopicAvailableAsync(topic, partition);
 
-                var deliveryResult = await _producer.ProduceAsync(
-                    new TopicPartition(topic.TopicName, new Partition(partition)),
+                var target = partition < 0
+                    ? new TopicPartition(topic.TopicName, Partition.Any)
+                    : new TopicPartition(topic.TopicName, new Partition(partition));
+
+                var deliveryResult = await producer.ProduceAsync(
+                    target,
                     message);
 
                 if (deliveryResult.Status == PersistenceStatus.Persisted)
                 {
-                    _logger.LogDebug(
+                    logger.LogDebug(
                         "Message delivered to {Topic}[{Partition}] at offset {Offset}",
-                        topic.TopicName, partition, deliveryResult.Offset);
+                        topic.TopicName, deliveryResult.Partition.Value, deliveryResult.Offset);
                     return true;
                 }
 
-                _logger.LogError(
+                logger.LogError(
                     "Message not persisted: status={Status}, topic={Topic}[{Partition}]",
-                    deliveryResult.Status, topic.TopicName, partition);
+                    deliveryResult.Status, topic.TopicName, deliveryResult.Partition.Value);
 
                 throw new KafkaProducerException(
                     $"Message delivery status: {deliveryResult.Status}");
             }
-            catch (ProduceException<string, string> ex)
+            catch (ProduceException<string, byte[]> ex)
             {
-                _logger.LogError(ex, "Kafka produce error on {Topic}[{Partition}]",
+                logger.LogError(ex, "Kafka produce error on {Topic}[{Partition}]",
                     topic.TopicName, partition);
                 throw new KafkaProducerException("Error producing message", ex);
             }
@@ -65,16 +54,20 @@ namespace Autumn.Kafka.Utils
 
         private async Task EnsureTopicAvailableAsync(TopicConfig topic, int partition)
         {
-            if (_kafkaTopicManager.CheckTopicContainsPartitions(topic.TopicName, partition))
+            var exists = partition < 0
+                ? kafkaTopicManager.CheckTopicExists(topic.TopicName)
+                : kafkaTopicManager.CheckTopicContainsPartitions(topic.TopicName, partition);
+
+            if (exists)
             {
                 return;
             }
 
-            _logger.LogInformation(
+            logger.LogInformation(
                 "Topic '{Topic}' missing partition {Partition}, auto-creating...",
                 topic.TopicName, partition);
 
-            await _kafkaTopicManager.CreateTopicAsync(
+            await kafkaTopicManager.CreateTopicAsync(
                 topic.TopicName, topic.PartitionsCount, topic.ReplicationFactor);
         }
     }

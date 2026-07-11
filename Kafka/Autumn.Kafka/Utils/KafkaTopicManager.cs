@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Autumn.Kafka.Exceptions;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
@@ -12,17 +13,23 @@ public class KafkaTopicManager(IAdminClient adminClient, ILogger<KafkaTopicManag
 {
     private readonly IAdminClient _adminClient = adminClient;
     private readonly ILogger<KafkaTopicManager> _logger = logger;
+    private readonly ConcurrentDictionary<string, bool> _verifiedTopics = new();
 
     /// <summary>
     /// Checks if a Kafka topic with the specified name exists.
     /// </summary>
     public bool CheckTopicExists(string topicName)
     {
+        if (_verifiedTopics.ContainsKey(topicName)) return true;
+
         try
         {
             var metadata = _adminClient.GetMetadata(topicName, TimeSpan.FromSeconds(10));
-            return metadata.Topics.Any(t =>
+            var exists = metadata.Topics.Any(t =>
                 t.Topic == topicName && t.Error.Code == ErrorCode.NoError);
+            
+            if (exists) _verifiedTopics.TryAdd(topicName, true);
+            return exists;
         }
         catch (Exception e)
         {
@@ -36,13 +43,19 @@ public class KafkaTopicManager(IAdminClient adminClient, ILogger<KafkaTopicManag
     /// </summary>
     public bool CheckTopicSatisfiesRequirements(string topicName, int numPartitions)
     {
+        var cacheKey = $"{topicName}_req_{numPartitions}";
+        if (_verifiedTopics.ContainsKey(cacheKey)) return true;
+
         try
         {
             var metadata = _adminClient.GetMetadata(topicName, TimeSpan.FromSeconds(10));
-            return metadata.Topics.Any(t =>
+            var satisfies = metadata.Topics.Any(t =>
                 t.Topic == topicName &&
                 t.Error.Code == ErrorCode.NoError &&
                 t.Partitions.Count == numPartitions);
+            
+            if (satisfies) _verifiedTopics.TryAdd(cacheKey, true);
+            return satisfies;
         }
         catch (Exception e)
         {
@@ -56,13 +69,19 @@ public class KafkaTopicManager(IAdminClient adminClient, ILogger<KafkaTopicManag
     /// </summary>
     public bool CheckTopicContainsPartitions(string topicName, int partition)
     {
+        var cacheKey = $"{topicName}_part_{partition}";
+        if (_verifiedTopics.ContainsKey(cacheKey)) return true;
+
         try
         {
             var metadata = _adminClient.GetMetadata(topicName, TimeSpan.FromSeconds(10));
-            return metadata.Topics.Any(t =>
+            var contains = metadata.Topics.Any(t =>
                 t.Topic == topicName &&
                 t.Error.Code == ErrorCode.NoError &&
                 t.Partitions.Any(p => p.PartitionId == partition));
+                
+            if (contains) _verifiedTopics.TryAdd(cacheKey, true);
+            return contains;
         }
         catch (Exception e)
         {
@@ -92,18 +111,44 @@ public class KafkaTopicManager(IAdminClient adminClient, ILogger<KafkaTopicManag
             _logger.LogInformation(
                 "Topic '{TopicName}' created ({Partitions} partitions, RF={RF})",
                 topicName, numPartitions, replicationFactor);
+            _verifiedTopics.TryAdd(topicName, true);
             return true;
         }
         catch (CreateTopicsException e)
             when (e.Results.Any(r => r.Error.Code == ErrorCode.TopicAlreadyExists))
         {
             _logger.LogDebug("Topic '{TopicName}' already exists", topicName);
+            WarnIfFewerPartitions(topicName, numPartitions);
+            _verifiedTopics.TryAdd(topicName, true);
             return true;
         }
         catch (Exception e)
         {
             _logger.LogError(e, "Failed to create topic '{TopicName}'", topicName);
             throw new KafkaTopicException($"Failed to create topic '{topicName}'", e);
+        }
+    }
+
+    // A pre-existing topic keeps its original partition count — CreateTopics does not change it.
+    // If it has fewer partitions than requested, ConsumerMode.Auto can't scale beyond that, so warn.
+    private void WarnIfFewerPartitions(string topicName, int requestedPartitions)
+    {
+        if (requestedPartitions <= 1) return;
+        try
+        {
+            var metadata = _adminClient.GetMetadata(topicName, TimeSpan.FromSeconds(10));
+            var actual = metadata.Topics.FirstOrDefault(t => t.Topic == topicName)?.Partitions.Count ?? 0;
+            if (actual > 0 && actual < requestedPartitions)
+            {
+                _logger.LogWarning(
+                    "Topic '{TopicName}' already exists with {Actual} partition(s), but {Requested} were requested. " +
+                    "ConsumerMode.Auto will run at most {Actual} effective consumer(s) for this topic.",
+                    topicName, actual, requestedPartitions, actual);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not verify partition count for topic '{TopicName}'", topicName);
         }
     }
 

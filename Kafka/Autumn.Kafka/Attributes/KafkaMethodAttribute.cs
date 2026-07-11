@@ -19,11 +19,6 @@ namespace Autumn.Kafka.Attributes
         /// </summary>
         public string MethodName { get; }
 
-        /// <summary>
-        /// The partition this method listens on. Default is 0.
-        /// Only relevant for multi-partition topics.
-        /// </summary>
-        public int Partition { get; set; } = 0;
 
         /// <summary>
         /// Whether this method should send a response back after processing.

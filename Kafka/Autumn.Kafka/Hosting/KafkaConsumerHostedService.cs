@@ -13,72 +13,116 @@ namespace Autumn.Kafka.Hosting
     /// One instance is registered per unique request topic discovered during assembly scanning.
     /// Each instance has its own <see cref="IConsumer{TKey,TValue}"/> and lifecycle.
     /// </summary>
-    public class KafkaConsumerHostedService : BackgroundService
+    public class KafkaConsumerHostedService(
+        MessageHandlerConfig handlerConfig,
+        IServiceProvider serviceProvider,
+        ILogger<KafkaConsumerHostedService> logger)
+        : BackgroundService
     {
-        private readonly MessageHandlerConfig _handlerConfig;
-        private readonly IServiceProvider _serviceProvider;
-        private readonly AutumnKafkaOptions _options;
-        private readonly ILogger<KafkaConsumerHostedService> _logger;
 
-        public KafkaConsumerHostedService(
-            MessageHandlerConfig handlerConfig,
-            IServiceProvider serviceProvider,
-            AutumnKafkaOptions options,
-            ILogger<KafkaConsumerHostedService> logger)
-        {
-            _handlerConfig = handlerConfig;
-            _serviceProvider = serviceProvider;
-            _options = options;
-            _logger = logger;
-        }
+        private MessageHandlers.BaseMessageHandler? _handler;
 
         /// <summary>
         /// The topic this consumer is bound to. Useful for diagnostics.
         /// </summary>
-        public string TopicName => _handlerConfig.RequestTopicConfig.TopicName;
+        public string TopicName => handlerConfig.RequestTopicConfig.TopicName;
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var topicName = _handlerConfig.RequestTopicConfig.TopicName;
+            var topicName = handlerConfig.RequestTopicConfig.TopicName;
 
-            _logger.LogInformation(
+            logger.LogInformation(
                 "Autumn.Kafka: Starting consumer for topic '{Topic}' ({MethodCount} method(s))",
-                topicName, _handlerConfig.KafkaMethodExecutionConfigs.Count);
+                topicName, handlerConfig.KafkaMethodExecutionConfigs.Count);
+
+            var options = serviceProvider.GetRequiredService<AutumnKafkaOptions>();
+            var topicManager = serviceProvider.GetRequiredService<KafkaTopicManager>();
+
+            if (options.AutoCreateTopics)
+            {
+                await topicManager.CreateTopicAsync(
+                    topicName,
+                    handlerConfig.RequestTopicConfig.PartitionsCount,
+                    handlerConfig.RequestTopicConfig.ReplicationFactor);
+            }
+            else
+            {
+                if (!topicManager.CheckTopicExists(topicName))
+                {
+                    throw new Exceptions.KafkaConfigurationException(
+                        $"Request topic '{topicName}' does not exist and AutoCreateTopics is false.");
+                }
+            }
+
+            _handler = CreateHandler();
 
             try
             {
-                var handler = CreateHandler();
-                await handler.Consume(stoppingToken);
+                // Dedicated long-running thread: the blocking Consume loop must NOT run on a
+                // ThreadPool thread, or N topics (× Auto-mode consumers) would pin the pool and
+                // starve async continuations. Awaited so ExecuteAsync stays alive for the
+                // consumer's lifetime — the host waits for a graceful shutdown, and fatal errors
+                // (ErrorPolicy.Stop) still propagate.
+                await Task.Factory.StartNew(
+                    () => _handler.Consume(stoppingToken),
+                    stoppingToken,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default).Unwrap();
             }
             catch (OperationCanceledException)
             {
-                _logger.LogInformation(
-                    "Autumn.Kafka: Consumer for topic '{Topic}' stopping...", topicName);
+                logger.LogInformation(
+                    "Autumn.Kafka: Consumer for topic '{Topic}' stopped.", topicName);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
+                logger.LogError(ex,
                     "Autumn.Kafka: Fatal error in consumer for topic '{Topic}'", topicName);
                 throw;
             }
         }
 
-        private MessageHandlers.MessageHandler CreateHandler()
+        private MessageHandlers.BaseMessageHandler CreateHandler()
         {
-            // Each consumer gets its own IConsumer instance via transient resolution
-            var consumer = _serviceProvider.GetRequiredService<IConsumer<string, string>>();
-            var producer = _serviceProvider.GetRequiredService<KafkaProducer>();
-            var logger = _serviceProvider.GetRequiredService<ILogger<MessageHandlers.JsonMessageHandler>>();
-
-            return new MessageHandlers.JsonMessageHandler(
-                producer, consumer, _handlerConfig, logger, _serviceProvider);
+            var consumer = serviceProvider.GetRequiredService<Func<IConsumer<string, byte[]>>>()();
+            var producer = serviceProvider.GetRequiredService<KafkaProducer>();
+            var options = serviceProvider.GetRequiredService<AutumnKafkaOptions>();
+            
+            return handlerConfig.HandlerType switch
+            {
+                Attributes.MessageHandlerType.AVRO => new MessageHandlers.AvroMessageHandler(
+                    producer, consumer, handlerConfig, 
+                    serviceProvider.GetRequiredService<ILogger<MessageHandlers.AvroMessageHandler>>(),
+                    serviceProvider,
+                    serviceProvider.GetRequiredService<Confluent.SchemaRegistry.ISchemaRegistryClient>(),
+                    options),
+                    
+                Attributes.MessageHandlerType.PROTOBUF => new MessageHandlers.ProtobufMessageHandler(
+                    producer, consumer, handlerConfig,
+                    serviceProvider.GetRequiredService<ILogger<MessageHandlers.ProtobufMessageHandler>>(),
+                    serviceProvider,
+                    serviceProvider.GetRequiredService<Confluent.SchemaRegistry.ISchemaRegistryClient>(),
+                    options),
+                    
+                _ => new MessageHandlers.JsonMessageHandler(
+                    producer, consumer, handlerConfig,
+                    serviceProvider.GetRequiredService<ILogger<MessageHandlers.JsonMessageHandler>>(),
+                    serviceProvider,
+                    options)
+            };
         }
 
         public override Task StopAsync(CancellationToken cancellationToken)
         {
-            _logger.LogInformation(
+            logger.LogInformation(
                 "Autumn.Kafka: Shutting down consumer for topic '{Topic}'", TopicName);
             return base.StopAsync(cancellationToken);
+        }
+
+        public override void Dispose()
+        {
+            _handler?.Dispose();
+            base.Dispose();
         }
     }
 }

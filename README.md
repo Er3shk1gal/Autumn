@@ -1,6 +1,13 @@
 # Autumn.Kafka
 
-Attribute-based Kafka framework for .NET — work with Kafka services like with ASP.NET controllers.
+Attribute-based Kafka framework for .NET — write Kafka consumers like ASP.NET controllers.
+
+- **Attribute routing** — `[KafkaService]` / `[KafkaMethod]`, dispatched by a message header.
+- **JSON / Avro / Protobuf** handlers (Schema Registry for the binary formats).
+- **At-least-once delivery** — manual offset commit, exponential retry, and a dead-letter queue.
+- **Auto-scaling consumers** — one consumer per topic, or several per topic (`ConsumerMode.Auto`).
+- **Full Kafka flexibility** — first-class SSL/SASL options plus raw passthrough to every `librdkafka` setting.
+- **Observability** — OpenTelemetry `ActivitySource` + metrics out of the box.
 
 ## Quick Start
 
@@ -33,48 +40,41 @@ public class OrderKafkaService
 {
     private readonly IOrderRepository _repository;
 
-    public OrderKafkaService(IOrderRepository repository)
-    {
-        _repository = repository;
-    }
+    public OrderKafkaService(IOrderRepository repository) => _repository = repository;
 
     [KafkaMethod("CreateOrder", RequiresResponse = true)]
-    public OrderResult CreateOrder(CreateOrderRequest request)
-    {
-        return _repository.Create(request);
-    }
+    public OrderResult CreateOrder(CreateOrderRequest request) => _repository.Create(request);
 
     [KafkaMethod("GetOrder", RequiresResponse = true)]
-    public Order? GetOrder(GetOrderQuery query)
-    {
-        return _repository.GetById(query.Id);
-    }
+    public Order? GetOrder(GetOrderQuery query) => _repository.GetById(query.Id);
 
     [KafkaMethod("DeleteOrder")]
-    public void DeleteOrder(DeleteOrderCommand command)
-    {
-        _repository.Delete(command.Id);
-    }
+    public async Task DeleteOrder(DeleteOrderCommand command, CancellationToken ct)
+        => await _repository.DeleteAsync(command.Id, ct);
 }
 ```
+
+A handler method takes **one payload parameter** (deserialized from the message body) plus an
+optional `CancellationToken`. It may return a value, `Task`, `Task<T>`, `ValueTask` or `ValueTask<T>`.
 
 ### 4. Register your service in DI
 
 ```csharp
 builder.Services.AddScoped<OrderKafkaService>();
-// or register by interface:
-// builder.Services.AddScoped<IOrderKafkaService, OrderKafkaService>();
+// or by interface: builder.Services.AddScoped<IOrderKafkaService, OrderKafkaService>();
 ```
 
-That's it! The consumers start automatically when the application starts.
+Consumers start automatically with the host.
 
 ## How It Works
 
-1. `AddAutumnKafka()` scans your assembly for classes with `[KafkaService]`
-2. For each unique request topic, a separate `IHostedService` consumer is registered
-3. Incoming messages are routed by the `"method"` header to the matching `[KafkaMethod]`
-4. The method's parameters are deserialized from the message body (JSON)
-5. If `RequiresResponse = true`, the result is serialized and sent to the response topic
+1. `AddAutumnKafka()` scans your assembly for `[KafkaService]` classes.
+2. For each unique request topic a background consumer is registered (`ConsumerMode.Single`), or
+   several consumers per topic in `ConsumerMode.Auto`.
+3. Incoming messages are routed by the `"method"` header to the matching `[KafkaMethod]`.
+4. The method's payload parameter is deserialized from the message body.
+5. If `RequiresResponse = true`, the result is serialized and sent to the response topic.
+6. The offset is committed only after successful processing (or after the message is sent to the DLQ).
 
 ## Attributes
 
@@ -84,93 +84,133 @@ That's it! The consumers start automatically when the application starts.
 |---|---|---|---|
 | `requestTopic` | `string` | *(required)* | Topic to consume from |
 | `serviceName` | `string` | *(required)* | Service identifier in message headers |
-| `RequestPartitions` | `int` | `1` | Number of partitions for request topic |
-| `HandlerType` | `MessageHandlerType` | `JSON` | Serialization format |
+| `RequestPartitions` | `int` | `1` | Partitions for the request topic (also the cap for `ConsumerMode.Auto`) |
+| `HandlerType` | `MessageHandlerType` | `JSON` | Serialization format (JSON / AVRO / PROTOBUF) |
 | `ResponseTopic` | `string?` | `null` | Topic for responses |
-| `ResponsePartitions` | `int` | `1` | Partitions for response topic |
+| `ResponsePartitions` | `int` | `1` | Partitions for the response topic |
 | `DefaultResponsePartition` | `int` | `0` | Default partition for responses |
-| `RequestReplicationFactor` | `short` | `1` | Replication factor for request topic |
-| `ResponseReplicationFactor` | `short` | `1` | Replication factor for response topic |
+| `RequestReplicationFactor` | `short` | `1` | Replication factor for the request topic |
+| `ResponseReplicationFactor` | `short` | `1` | Replication factor for the response topic |
 
 ### `[KafkaMethod]`
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `methodName` | `string` | *(required)* | Method identifier in message headers |
-| `Partition` | `int` | `0` | Partition to consume from |
+| `methodName` | `string` | *(required)* | Method identifier in the `method` header |
 | `RequiresResponse` | `bool` | `false` | Whether to send a response |
-| `ResponsePartition` | `int` | `-1` | Override response partition (`-1` = use service default) |
+| `ResponsePartition` | `int` | `-1` | Override response partition (`-1` = service default) |
 
-## Configuration
+## Configuration Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `BootstrapServers` | `string` | `"localhost:9092"` | Kafka bootstrap servers |
+| `GroupId` | `string` | *(required)* | Consumer group id |
+| `ServiceName` | `string?` | `null` | Logical name for the outgoing `sender` header |
+| `SchemaRegistryUrl` | `string?` | `null` | Schema Registry URL (required for AVRO/PROTOBUF) |
+| `AutoCreateTopics` | `bool` | `true` | Auto-create topics that do not exist |
+| `ErrorPolicy` | `ErrorPolicy` | `Dlq` | Poison-message policy (Skip / Dlq / Stop) |
+| `MaxRetries` | `int` | `3` | Retry attempts for transient errors |
+| `RetryDelay` | `TimeSpan` | `1s` | Base delay for exponential backoff |
+| `MaxRetryDelay` | `TimeSpan` | `30s` | Cap on a single backoff delay (avoids `max.poll.interval.ms` eviction) |
+| `DlqTopicSuffix` | `string` | `".dlq"` | Suffix for the DLQ topic |
+| `ConsumerMode` | `ConsumerMode` | `Single` | `Single` (1 consumer/topic) or `Auto` (scale to partitions) |
+| `MaxConsumersPerTopic` | `int` | `0` | Cap for `Auto` (0 = partition count) |
+| `AutoOffsetReset` | `AutoOffsetReset` | `Earliest` | Offset reset policy |
+| `JsonSerializerOptions` | `JsonSerializerOptions` | `Web` | JSON serialization settings |
+| `ServiceAssembly` | `Assembly?` | `null` | Assembly to scan for services |
+| `Security` | `KafkaSecurityOptions` | `new()` | First-class SSL/SASL settings (see below) |
+| `RawConfig` | `Dictionary<string,string>` | `{}` | Raw `librdkafka` key/values (any setting) |
+| `ConfigureConsumer` | `Action<ConsumerConfig>?` | `null` | Advanced consumer override (applied last) |
+| `ConfigureProducer` | `Action<ProducerConfig>?` | `null` | Advanced producer override (applied last) |
+| `ConfigureAdminClient` | `Action<AdminClientConfig>?` | `null` | Advanced admin override (applied last) |
+| `ConfigureSchemaRegistry` | `Action<SchemaRegistryConfig>?` | `null` | Schema Registry override (auth/SSL) |
+
+## Consumer Scaling
+
+- **`ConsumerMode.Single`** (default) — one consumer per topic. Messages on a topic are processed
+  sequentially; a slow handler never affects other topics. Scale out by running more app instances.
+- **`ConsumerMode.Auto`** — several consumers in the same group per topic, up to the partition count
+  (optionally capped by `MaxConsumersPerTopic`). Kafka spreads partitions across them for in-process
+  parallelism while preserving per-partition ordering.
+
+```csharp
+options.ConsumerMode = ConsumerMode.Auto;   // parallelize bottlenecked handlers
+options.MaxConsumersPerTopic = 4;           // optional cap
+```
+
+> A topic must actually have multiple partitions for `Auto` to parallelize. Set `RequestPartitions`
+> accordingly, and make sure the topic is created with that partition count.
+
+## Security & Full Kafka Configuration
+
+The TLS/SASL handshake is performed by `librdkafka` (Confluent.Kafka) — Autumn.Kafka forwards your
+settings and never hides a `librdkafka` option. Configuration is layered, last writer wins:
+
+**defaults → typed `Security` → `RawConfig` → `Configure*` callback**
 
 ```csharp
 services.AddAutumnKafka(options =>
 {
-    // Required
-    options.BootstrapServers = "broker1:9092,broker2:9092";
-    options.GroupId = "my-group";
+    options.BootstrapServers = "broker:9093";
+    options.GroupId = "svc";
 
-    // Optional
-    options.ServiceName = "my-service";
-    options.AutoCreateTopics = true;
-    options.AutoOffsetReset = AutoOffsetReset.Earliest;
-    options.EnableAutoCommit = false;
-    options.ServiceAssembly = typeof(Program).Assembly;
+    // Typed SSL/SASL (applied to consumer, producer AND admin clients)
+    options.Security.SecurityProtocol = SecurityProtocol.SaslSsl;
+    options.Security.SaslMechanism = SaslMechanism.Plain;
+    options.Security.SaslUsername = "user";
+    options.Security.SaslPassword = "password";
+    options.Security.SslCaLocation = "/certs/ca.pem";
 
-    // Advanced: override consumer/producer configs
-    options.ConfigureConsumer = config =>
-    {
-        config.SessionTimeoutMs = 30000;
-        config.MaxPollIntervalMs = 300000;
-    };
+    // Any librdkafka setting not surfaced as a typed option
+    options.RawConfig["fetch.max.bytes"] = "5242880";
 
-    options.ConfigureProducer = config =>
-    {
-        config.Acks = Acks.All;
-        config.LingerMs = 5;
-    };
+    // Full escape hatch — overrides everything above
+    options.ConfigureConsumer = c => c.ClientId = "svc-1";
 });
 ```
 
-## Multi-Topic Example
+The only deliberate restriction is `EnableAutoCommit`: it is forced off (and rejected even via
+`RawConfig`) because Autumn.Kafka commits manually to guarantee at-least-once delivery.
 
-Each `[KafkaService]` class gets its own consumer with isolated lifecycle:
+## Error Handling & Retries
 
-```csharp
-[KafkaService("orders-topic", "order-svc", ResponseTopic = "orders-response")]
-public class OrderService
-{
-    [KafkaMethod("Create", RequiresResponse = true)]
-    public OrderResult Create(CreateOrderRequest req) { /* ... */ }
-}
+Transient exceptions are retried up to `MaxRetries` times with clamped exponential backoff
+(`min(RetryDelay * 2^(attempt-1), MaxRetryDelay)`).
 
-[KafkaService("payments-topic", "payment-svc", RequestPartitions = 3)]
-public class PaymentService
-{
-    [KafkaMethod("Process", Partition = 0)]
-    public void ProcessCard(CardPayment payment) { /* ... */ }
+> [!IMPORTANT]
+> With `MaxRetries > 0`, delivery is at-least-once — design your handlers to be idempotent.
 
-    [KafkaMethod("Refund", Partition = 1)]
-    public void Refund(RefundRequest req) { /* ... */ }
-}
-```
+**Deterministic errors** (`KafkaConsumerException` / `KafkaConfigurationException` — bad payload,
+missing `method` header, unknown method) skip retries and apply the error policy immediately.
 
-This creates **two independent consumers** — one for `orders-topic`, one for `payments-topic`.
+**Error policies:**
+- **`Dlq`** (default) — publish to `<request-topic>.dlq` with `error` + `stacktrace` headers, then commit.
+- **`Skip`** — log a warning, skip the message, commit.
+- **`Stop`** — log critical and stop the consumer, faulting the host.
+
+Offset-commit and DLQ-publish failures are handled without crashing the consumer (the message is
+redelivered rather than lost).
 
 ## Message Format
-
-Messages are routed by the `method` header:
 
 | Header | Description |
 |---|---|
 | `method` | Maps to `[KafkaMethod("name")]` |
-| `sender` | Set automatically from `ServiceName` in responses |
+| `sender` | Set from `ServiceName` on responses |
+| `traceparent` / `tracestate` | W3C trace context (propagated for distributed tracing) |
 
-Message body is JSON-serialized using Newtonsoft.Json.
+Body is serialized with `System.Text.Json` (or Avro/Protobuf if configured).
+
+## Observability
+
+Autumn.Kafka emits an `ActivitySource` and `Meter` named `"Autumn.Kafka"`. Register them with
+OpenTelemetry to get distributed traces (producer → consumer → response) and metrics
+(`messages_processed`, `messages_failed`, `messages_dlq`, `retry_attempts`, `processing_duration`).
 
 ## Exceptions
 
-All exceptions inherit from `KafkaException`:
+All inherit from `KafkaException`:
 
 | Exception | When |
 |---|---|

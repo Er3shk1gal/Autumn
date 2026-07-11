@@ -63,13 +63,23 @@ namespace Autumn.Kafka.Extensions
             services.AddSingleton<IAdminClient>(_ =>
                 new AdminClientBuilder(options.BuildAdminClientConfig()).Build());
 
-            // Producer (singleton — thread-safe)
-            services.AddSingleton<IProducer<string, string>>(_ =>
-                new ProducerBuilder<string, string>(options.BuildProducerConfig()).Build());
+            if (!string.IsNullOrWhiteSpace(options.SchemaRegistryUrl))
+            {
+                services.AddSingleton<Confluent.SchemaRegistry.ISchemaRegistryClient>(_ =>
+                    new Confluent.SchemaRegistry.CachedSchemaRegistryClient(options.BuildSchemaRegistryConfig()));
+            }
 
-            // Consumer factory — each topic handler gets its own consumer
-            services.AddTransient<IConsumer<string, string>>(_ =>
-                new ConsumerBuilder<string, string>(options.BuildConsumerConfig()).Build());
+            // Producer (singleton — thread-safe)
+            services.AddSingleton<IProducer<string, byte[]>>(_ =>
+                new ProducerBuilder<string, byte[]>(options.BuildProducerConfig()).Build());
+
+            // Consumer factory — each hosted service creates and OWNS its own consumer. Registering
+            // the consumer itself as a transient resolved from the root provider would make the DI
+            // container track it as a root-scoped disposable and retain the handle until app exit
+            // (multiplied by ConsumerMode.Auto). A factory hands ownership to the hosted service.
+            services.AddSingleton<Func<IConsumer<string, byte[]>>>(sp =>
+                () => new ConsumerBuilder<string, byte[]>(
+                    sp.GetRequiredService<AutumnKafkaOptions>().BuildConsumerConfig()).Build());
 
             // Internal services
             services.AddSingleton<KafkaTopicManager>();
@@ -91,18 +101,49 @@ namespace Autumn.Kafka.Extensions
                 return;
             }
 
-            // Register one hosted service per unique topic
+            var hasBinaryHandlers = handlerConfigs.Any(c => 
+                c.HandlerType == Attributes.MessageHandlerType.AVRO || 
+                c.HandlerType == Attributes.MessageHandlerType.PROTOBUF);
+
+            if (hasBinaryHandlers && string.IsNullOrWhiteSpace(options.SchemaRegistryUrl))
+            {
+                throw new Exceptions.KafkaConfigurationException(
+                    "SchemaRegistryUrl is required in AutumnKafkaOptions when using AVRO or PROTOBUF handlers.");
+            }
+
+            // Register consumers per unique topic. In Single mode: one consumer per topic.
+            // In Auto mode: several consumers in the same group (up to the partition count),
+            // so Kafka spreads the topic's partitions across them for in-process parallelism.
             foreach (var config in handlerConfigs)
             {
                 var capturedConfig = config;
+                var instances = ResolveConsumerCount(options, capturedConfig);
 
-                services.AddSingleton<IHostedService>(sp =>
-                    new KafkaConsumerHostedService(
-                        capturedConfig,
-                        sp,
-                        sp.GetRequiredService<AutumnKafkaOptions>(),
-                        sp.GetRequiredService<ILogger<KafkaConsumerHostedService>>()));
+                for (var i = 0; i < instances; i++)
+                {
+                    services.AddSingleton<IHostedService>(sp =>
+                        new KafkaConsumerHostedService(
+                            capturedConfig,
+                            sp,
+                            sp.GetRequiredService<ILogger<KafkaConsumerHostedService>>()));
+                }
             }
+        }
+
+        private static int ResolveConsumerCount(
+            AutumnKafkaOptions options, Utils.Models.MessageHandlerConfig config)
+        {
+            if (options.ConsumerMode != ConsumerMode.Auto)
+            {
+                return 1;
+            }
+
+            // Never exceed the partition count — extra consumers in the group would sit idle.
+            var partitions = Math.Max(1, config.RequestTopicConfig.PartitionsCount);
+            var cap = options.MaxConsumersPerTopic > 0
+                ? Math.Min(partitions, options.MaxConsumersPerTopic)
+                : partitions;
+            return Math.Max(1, cap);
         }
     }
 }

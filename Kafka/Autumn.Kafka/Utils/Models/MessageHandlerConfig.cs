@@ -8,6 +8,7 @@ namespace Autumn.Kafka.Utils.Models
     public class MessageHandlerConfig
     {
         public TopicConfig RequestTopicConfig { get; set; } = null!;
-        public HashSet<KafkaMethodExecutionConfig> KafkaMethodExecutionConfigs { get; set; } = [];
+        public Attributes.MessageHandlerType HandlerType { get; set; } = Attributes.MessageHandlerType.JSON;
+        public Dictionary<string, KafkaMethodExecutionConfig> KafkaMethodExecutionConfigs { get; set; } = [];
     }
 }
