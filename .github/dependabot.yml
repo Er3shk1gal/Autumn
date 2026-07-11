@@ -8,6 +8,12 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      # Microsoft.Extensions.* are pinned per target framework (net8 -> 8.0.x, net10 -> 10.0.x)
+      # via conditional ItemGroups. Ignore major bumps so Dependabot doesn't try to push the
+      # net8 references to 10.x (which would raise the dependency floor for net8 consumers).
+      - dependency-name: "Microsoft.Extensions.*"
+        update-types: ["version-update:semver-major"]
 
   # Test project dependencies
   - package-ecosystem: nuget
