@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Package identity -->
+    <PackageId>Irkalla.Kafka</PackageId>
+    <Version>0.1.0</Version>
+    <Title>Irkalla.Kafka</Title>
+    <Authors>Er3shk1gal</Authors>
+    <Description>Attribute-based Kafka service framework for .NET — write Kafka consumers like ASP.NET controllers. Routing by message header, JSON/Avro/Protobuf, at-least-once delivery with retries and a dead-letter queue, auto-scaling consumers, and full passthrough to the underlying Confluent.Kafka (SSL/SASL) configuration.</Description>
+    <PackageTags>kafka;confluent;messaging;consumer;producer;attributes;aspnetcore;dependency-injection;avro;protobuf;dead-letter-queue;event-driven</PackageTags>
+    <PackageReleaseNotes>0.1.0 — First public release. Attribute-based services, header routing, JSON/Avro/Protobuf handlers, ErrorPolicy (Skip/Dlq/Stop) with clamped exponential retry, ConsumerMode.Single/Auto (auto-scaling consumers per topic), first-class SSL/SASL options plus raw librdkafka passthrough, OpenTelemetry ActivitySource + metrics. Fully tested.</PackageReleaseNotes>
+
+    <!-- License / links -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Er3shk1gal/Irkalla/tree/main/Kafka/Irkalla.Kafka</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Er3shk1gal/Irkalla.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Package quality: XML docs, deterministic build, SourceLink, symbols -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Confluent.Kafka" Version="2.6.1" />
+    <PackageReference Include="Confluent.SchemaRegistry" Version="2.6.1" />
+    <PackageReference Include="Confluent.SchemaRegistry.Serdes.Avro" Version="2.6.1" />
+    <PackageReference Include="Confluent.SchemaRegistry.Serdes.Protobuf" Version="2.6.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Irkalla.Kafka.Tests" />
+  </ItemGroup>
+
+  <!-- Pack the repository README as the NuGet front page -->
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

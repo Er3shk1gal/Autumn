@@ -1,4 +1,4 @@
-# Autumn.Kafka
+# Irkalla.Kafka
 
 Attribute-based Kafka framework for .NET — write Kafka consumers like ASP.NET controllers.
 
@@ -14,14 +14,14 @@ Attribute-based Kafka framework for .NET — write Kafka consumers like ASP.NET 
 ### 1. Install
 
 ```bash
-dotnet add package Autumn.Kafka
+dotnet add package Irkalla.Kafka
 ```
 
 ### 2. Register in DI
 
 ```csharp
 // Program.cs
-builder.Services.AddAutumnKafka(options =>
+builder.Services.AddIrkallaKafka(options =>
 {
     options.BootstrapServers = "localhost:9092";
     options.GroupId = "my-consumer-group";
@@ -33,7 +33,7 @@ builder.Services.AddAutumnKafka(options =>
 ### 3. Create a Kafka Service
 
 ```csharp
-using Autumn.Kafka.Attributes;
+using Irkalla.Kafka.Attributes;
 
 [KafkaService("orders-request", "order-service", ResponseTopic = "orders-response")]
 public class OrderKafkaService
@@ -68,7 +68,7 @@ Consumers start automatically with the host.
 
 ## How It Works
 
-1. `AddAutumnKafka()` scans your assembly for `[KafkaService]` classes.
+1. `AddIrkallaKafka()` scans your assembly for `[KafkaService]` classes.
 2. For each unique request topic a background consumer is registered (`ConsumerMode.Single`), or
    several consumers per topic in `ConsumerMode.Auto`.
 3. Incoming messages are routed by the `"method"` header to the matching `[KafkaMethod]`.
@@ -144,13 +144,13 @@ options.MaxConsumersPerTopic = 4;           // optional cap
 
 ## Security & Full Kafka Configuration
 
-The TLS/SASL handshake is performed by `librdkafka` (Confluent.Kafka) — Autumn.Kafka forwards your
+The TLS/SASL handshake is performed by `librdkafka` (Confluent.Kafka) — Irkalla.Kafka forwards your
 settings and never hides a `librdkafka` option. Configuration is layered, last writer wins:
 
 **defaults → typed `Security` → `RawConfig` → `Configure*` callback**
 
 ```csharp
-services.AddAutumnKafka(options =>
+services.AddIrkallaKafka(options =>
 {
     options.BootstrapServers = "broker:9093";
     options.GroupId = "svc";
@@ -171,7 +171,7 @@ services.AddAutumnKafka(options =>
 ```
 
 The only deliberate restriction is `EnableAutoCommit`: it is forced off (and rejected even via
-`RawConfig`) because Autumn.Kafka commits manually to guarantee at-least-once delivery.
+`RawConfig`) because Irkalla.Kafka commits manually to guarantee at-least-once delivery.
 
 ## Error Handling & Retries
 
@@ -204,7 +204,7 @@ Body is serialized with `System.Text.Json` (or Avro/Protobuf if configured).
 
 ## Observability
 
-Autumn.Kafka emits an `ActivitySource` and `Meter` named `"Autumn.Kafka"`. Register them with
+Irkalla.Kafka emits an `ActivitySource` and `Meter` named `"Irkalla.Kafka"`. Register them with
 OpenTelemetry to get distributed traces (producer → consumer → response) and metrics
 (`messages_processed`, `messages_failed`, `messages_dlq`, `retry_attempts`, `processing_duration`).
 
