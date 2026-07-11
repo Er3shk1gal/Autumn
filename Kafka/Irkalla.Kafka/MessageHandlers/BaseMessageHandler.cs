@@ -355,11 +355,11 @@ namespace Irkalla.Kafka.MessageHandlers
             Activity? activity = null;
             if (traceParent != null && ActivityContext.TryParse(traceParent, traceState, out var parentContext))
             {
-                activity = ActivitySource.StartActivity("autumn.kafka.consume", ActivityKind.Consumer, parentContext);
+                activity = ActivitySource.StartActivity("irkalla.kafka.consume", ActivityKind.Consumer, parentContext);
             }
             else
             {
-                activity = ActivitySource.StartActivity("autumn.kafka.consume", ActivityKind.Consumer);
+                activity = ActivitySource.StartActivity("irkalla.kafka.consume", ActivityKind.Consumer);
             }
 
             if (activity != null)
