@@ -2,6 +2,7 @@ using System.Text;
 using System.Runtime.ExceptionServices;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using Irkalla.Kafka.Deduplication;
 using Irkalla.Kafka.Exceptions;
 using Irkalla.Kafka.Utils;
 using Irkalla.Kafka.Utils.Models;
@@ -26,6 +27,7 @@ namespace Irkalla.Kafka.MessageHandlers
         protected readonly ILogger Logger = logger;
         protected readonly IServiceProvider ServiceProvider = serviceProvider;
         protected readonly Irkalla.Kafka.Configuration.IrkallaKafkaOptions Options = options;
+        private readonly IMessageDeduplicator? _deduplicator = serviceProvider.GetService<IMessageDeduplicator>();
 
         private static readonly ActivitySource ActivitySource = new("Irkalla.Kafka");
         private static readonly Meter Meter = new("Irkalla.Kafka");
@@ -208,32 +210,72 @@ namespace Irkalla.Kafka.MessageHandlers
                 throw new KafkaConsumerException($"No handler registered for method '{methodName}'");
             }
 
+            // Optional consumer-side de-duplication by the 'message-id' header.
+            var dedupTopic = MessageHandlerConfig.RequestTopicConfig.TopicName;
+            var messageId = TryGetHeaderString(message.Message.Headers, "message-id");
+            if (_deduplicator != null && messageId != null &&
+                await _deduplicator.IsDuplicateAsync(messageId, dedupTopic, cancellationToken))
+            {
+                Logger.LogDebug("Skipping duplicate message-id '{Id}' on '{Topic}'", messageId, dedupTopic);
+                return true;
+            }
+
             using var activity = StartConsumeActivity(message, methodName);
 
             var result = await InvokeServiceMethodAsync(config, message.Message.Value, cancellationToken);
 
-            if (!config.RequireResponse || result == ServiceResolver.VoidResultMarker)
+            // Record successful processing so a redelivery is skipped above.
+            if (_deduplicator != null && messageId != null)
+            {
+                await _deduplicator.MarkProcessedAsync(messageId, dedupTopic, cancellationToken);
+            }
+
+            // RPC hooks: a client may send 'reply-to' (where to send the reply) and 'correlation-id'
+            // (echoed back so the client can match the reply to its request).
+            var replyTo = TryGetHeaderString(message.Message.Headers, "reply-to");
+            var correlationBytes = message.Message.Headers?
+                .FirstOrDefault(h => h.Key == "correlation-id")?.GetValueBytes();
+
+            // Fire-and-forget: no reply-to and the method doesn't require a response.
+            if (replyTo == null && (!config.RequireResponse || result == ServiceResolver.VoidResultMarker))
             {
                 return true;
             }
 
-            var senderName = config.KafkaServiceName ?? Options.ServiceName
-                ?? throw new KafkaConfigurationException(
-                    "KafkaServiceName is not configured for response handling globally or on the [KafkaService] attribute.");
+            var responseTopicName = replyTo ?? config.ResponseTopicConfig?.TopicName ?? "";
+            var value = result == null || result == ServiceResolver.VoidResultMarker
+                ? Array.Empty<byte>()
+                : await SerializeAsync(result, result.GetType(),
+                    new SerializationContext(MessageComponentType.Value, responseTopicName));
+
+            var headers = new Headers { { "method", Encoding.UTF8.GetBytes(methodName) } };
+            var senderName = config.KafkaServiceName ?? Options.ServiceName;
+            if (senderName != null) headers.Add("sender", Encoding.UTF8.GetBytes(senderName));
+            if (correlationBytes != null) headers.Add("correlation-id", correlationBytes);
 
             var responseMessage = new Message<string, byte[]>
             {
                 Key = message.Message.Key,
-                Value = result == null ? [] : await SerializeAsync(result, result.GetType(), new SerializationContext(MessageComponentType.Value, config.ResponseTopicConfig?.TopicName ?? "")),
-                Headers =
-                [
-                    new Header("method", Encoding.UTF8.GetBytes(methodName)),
-                    new Header("sender", Encoding.UTF8.GetBytes(senderName))
-                ]
+                Value = value,
+                Headers = headers,
             };
             InjectTraceHeaders(responseMessage.Headers);
 
+            if (replyTo != null)
+            {
+                // RPC reply: route to the client's reply topic (already created by the client).
+                return await Producer.ProduceAsync(
+                    new TopicConfig { TopicName = replyTo, PartitionsCount = 1, ReplicationFactor = 1 },
+                    -1, responseMessage);
+            }
+
             return await SendResponse(config, responseMessage);
+        }
+
+        private static string? TryGetHeaderString(Headers? headers, string key)
+        {
+            var h = headers?.FirstOrDefault(x => x.Key == key);
+            return h == null ? null : Encoding.UTF8.GetString(h.GetValueBytes());
         }
 
         private async Task<object?> InvokeServiceMethodAsync(KafkaMethodExecutionConfig config, byte[] messageValue, CancellationToken cancellationToken)
@@ -316,7 +358,9 @@ namespace Irkalla.Kafka.MessageHandlers
             headers.Remove("stacktrace");
 
             headers.Add("error", Encoding.UTF8.GetBytes(exception?.Message ?? "Unknown Error"));
-            if (exception?.StackTrace != null)
+            // The stack trace can leak internal detail (paths, types, versions) to anyone with read
+            // access to the DLQ topic, so it is opt-in and off by default.
+            if (Options.IncludeStackTraceInDlq && exception?.StackTrace != null)
             {
                 headers.Add("stacktrace", Encoding.UTF8.GetBytes(exception.StackTrace));
             }

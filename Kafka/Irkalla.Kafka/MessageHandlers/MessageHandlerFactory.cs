@@ -21,8 +21,16 @@ public static class MessageHandlerFactory
     /// Performs strict configuration validation.
     /// </summary>
     public static IEnumerable<MessageHandlerConfig> BuildHandlerConfigs(Assembly assembly)
+        => BuildHandlerConfigs(new[] { assembly });
+
+    /// <summary>
+    /// Scans the given assemblies and builds one <see cref="MessageHandlerConfig"/> per unique
+    /// request topic (merged across all assemblies). Performs strict configuration validation.
+    /// </summary>
+    public static IEnumerable<MessageHandlerConfig> BuildHandlerConfigs(IEnumerable<Assembly> assemblies)
     {
-        var serviceTypes = assembly.GetTypes()
+        var serviceTypes = assemblies
+            .SelectMany(a => a.GetTypes())
             .Where(t => t.GetCustomAttribute<KafkaServiceAttribute>() != null)
             .ToList();
 
@@ -61,6 +69,7 @@ public static class MessageHandlerFactory
                         ReplicationFactor = serviceAttr.RequestReplicationFactor,
                     },
                     HandlerType = serviceAttr.HandlerType,
+                    GroupId = serviceAttr.GroupId,
                     KafkaMethodExecutionConfigs = new Dictionary<string, KafkaMethodExecutionConfig>(),
                 };
                 configsByTopic[serviceAttr.RequestTopic] = handlerConfig;
@@ -74,6 +83,15 @@ public static class MessageHandlerFactory
                         $"Topic '{serviceAttr.RequestTopic}' is configured with conflicting HandlerTypes: " +
                         $"'{handlerConfig.HandlerType}' and '{serviceAttr.HandlerType}'. " +
                         "All services sharing a RequestTopic must use the same HandlerType.");
+                }
+
+                // Validate GroupId matches across services sharing the same topic
+                if (handlerConfig.GroupId != serviceAttr.GroupId)
+                {
+                    throw new KafkaConfigurationException(
+                        $"Topic '{serviceAttr.RequestTopic}' is configured with conflicting GroupIds: " +
+                        $"'{handlerConfig.GroupId ?? "(global)"}' and '{serviceAttr.GroupId ?? "(global)"}'. " +
+                        "All services sharing a RequestTopic must use the same GroupId.");
                 }
             }
 

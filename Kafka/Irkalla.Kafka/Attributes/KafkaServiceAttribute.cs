@@ -29,6 +29,14 @@ namespace Irkalla.Kafka.Attributes
         public string ServiceName { get; }
 
         /// <summary>
+        /// Optional consumer group for this service's topic. When set, this topic's consumer joins
+        /// this group instead of the global <c>IrkallaKafkaOptions.GroupId</c> — lets one process
+        /// host services in different consumer groups. Services sharing a request topic must agree
+        /// on the group. Default: null (use the global group).
+        /// </summary>
+        public string? GroupId { get; set; }
+
+        /// <summary>
         /// Number of partitions for the request topic. Default is 1.
         /// </summary>
         public int RequestPartitions { get; set; } = 1;

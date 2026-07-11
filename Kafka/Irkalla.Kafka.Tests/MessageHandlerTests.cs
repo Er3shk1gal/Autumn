@@ -105,6 +105,27 @@ public class ServiceProtobufValid
     [KafkaMethod("methodA")]
     public void MethodA(TestProtobufMessage payload1) { }
 }
+
+[KafkaService("topic-grp", "grp-svc", GroupId = "custom-group")]
+public class ServiceWithGroup
+{
+    [KafkaMethod("m")]
+    public void M(string p) { }
+}
+
+[KafkaService("topic-grp-conflict", "gc1", GroupId = "group-a")]
+public class GroupConflictService1
+{
+    [KafkaMethod("m1")]
+    public void M(string p) { }
+}
+
+[KafkaService("topic-grp-conflict", "gc2", GroupId = "group-b")]
+public class GroupConflictService2
+{
+    [KafkaMethod("m2")]
+    public void M(string p) { }
+}
 #endregion
 
 public class MessageHandlerFactoryTests
@@ -176,6 +197,47 @@ public class MessageHandlerFactoryTests
         var assembly = new DummyAssembly(typeof(ServiceProtobufValid));
         var configs = MessageHandlerFactory.BuildHandlerConfigs(assembly).ToList();
         Assert.Single(configs);
+    }
+
+    [Fact]
+    public void BuildHandlerConfigs_MultipleAssemblies_DifferentTopics_AreScanned()
+    {
+        var a1 = new DummyAssembly(typeof(ValidService));            // topic1
+        var a2 = new DummyAssembly(typeof(ServiceProtobufValid));    // topic-protobuf-valid
+        var configs = MessageHandlerFactory.BuildHandlerConfigs(new Assembly[] { a1, a2 }).ToList();
+        Assert.Equal(2, configs.Count);
+    }
+
+    [Fact]
+    public void BuildHandlerConfigs_MultipleAssemblies_SameTopic_MergeMethods()
+    {
+        var a1 = new DummyAssembly(typeof(ValidService));            // topic1: method1, method2
+        var a2 = new DummyAssembly(typeof(ValidServiceWithResponse)); // topic1: method3
+        var configs = MessageHandlerFactory.BuildHandlerConfigs(new Assembly[] { a1, a2 }).ToList();
+        Assert.Single(configs);
+        Assert.Equal(3, configs[0].KafkaMethodExecutionConfigs.Count);
+    }
+
+    [Fact]
+    public void BuildHandlerConfigs_ServiceGroupId_IsCaptured()
+    {
+        var configs = MessageHandlerFactory.BuildHandlerConfigs(new DummyAssembly(typeof(ServiceWithGroup))).ToList();
+        Assert.Equal("custom-group", configs.Single().GroupId);
+    }
+
+    [Fact]
+    public void BuildHandlerConfigs_ConflictingGroupIdOnTopic_Throws()
+    {
+        var a = new DummyAssembly(typeof(GroupConflictService1), typeof(GroupConflictService2));
+        Assert.Throws<KafkaConfigurationException>(() => MessageHandlerFactory.BuildHandlerConfigs(a));
+    }
+
+    [Fact]
+    public void BuildConsumerConfig_GroupOverride_Wins()
+    {
+        var o = new Irkalla.Kafka.Configuration.IrkallaKafkaOptions { GroupId = "global" };
+        Assert.Equal("global", o.BuildConsumerConfig().GroupId);
+        Assert.Equal("svc-group", o.BuildConsumerConfig("svc-group").GroupId);
     }
 }
 

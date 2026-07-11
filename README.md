@@ -1,13 +1,17 @@
 # Irkalla.Kafka
 
-Attribute-based Kafka framework for .NET — write Kafka consumers like ASP.NET controllers.
+Attribute-based Kafka framework for .NET (net8.0 / net10.0) — write Kafka consumers like ASP.NET controllers.
 
 - **Attribute routing** — `[KafkaService]` / `[KafkaMethod]`, dispatched by a message header.
+- **Fire-and-forget or request-response** — responses are opt-in per method.
+- **Typed producer** — `IKafkaProducer.SendAsync<T>(...)`, plus producer-only registration (no `GroupId`).
+- **Request-reply RPC** — `IKafkaRpcClient.CallAsync<TReq, TRes>(...)`, correlation-matched typed replies.
 - **JSON / Avro / Protobuf** handlers (Schema Registry for the binary formats).
 - **At-least-once delivery** — manual offset commit, exponential retry, and a dead-letter queue.
 - **Auto-scaling consumers** — one consumer per topic, or several per topic (`ConsumerMode.Auto`).
 - **Full Kafka flexibility** — first-class SSL/SASL options plus raw passthrough to every `librdkafka` setting.
-- **Observability** — OpenTelemetry `ActivitySource` + metrics out of the box.
+- **Configuration** — code, `appsettings.json` (`IConfiguration`), or `IOptions`.
+- **Observability** — OpenTelemetry `ActivitySource` + metrics, and a health check, out of the box.
 
 ## Quick Start
 
@@ -84,6 +88,7 @@ Consumers start automatically with the host.
 |---|---|---|---|
 | `requestTopic` | `string` | *(required)* | Topic to consume from |
 | `serviceName` | `string` | *(required)* | Service identifier in message headers |
+| `GroupId` | `string?` | `null` | Per-service consumer group override (default: global `GroupId`) |
 | `RequestPartitions` | `int` | `1` | Partitions for the request topic (also the cap for `ConsumerMode.Auto`) |
 | `HandlerType` | `MessageHandlerType` | `JSON` | Serialization format (JSON / AVRO / PROTOBUF) |
 | `ResponseTopic` | `string?` | `null` | Topic for responses |
@@ -113,12 +118,15 @@ Consumers start automatically with the host.
 | `MaxRetries` | `int` | `3` | Retry attempts for transient errors |
 | `RetryDelay` | `TimeSpan` | `1s` | Base delay for exponential backoff |
 | `MaxRetryDelay` | `TimeSpan` | `30s` | Cap on a single backoff delay (avoids `max.poll.interval.ms` eviction) |
+| `EnableIdempotence` | `bool` | `true` | Idempotent producer — no duplicate produces on retry |
 | `DlqTopicSuffix` | `string` | `".dlq"` | Suffix for the DLQ topic |
+| `IncludeStackTraceInDlq` | `bool` | `false` | Include the exception stack trace in DLQ headers (off — avoids leaking internals) |
 | `ConsumerMode` | `ConsumerMode` | `Single` | `Single` (1 consumer/topic) or `Auto` (scale to partitions) |
 | `MaxConsumersPerTopic` | `int` | `0` | Cap for `Auto` (0 = partition count) |
 | `AutoOffsetReset` | `AutoOffsetReset` | `Earliest` | Offset reset policy |
 | `JsonSerializerOptions` | `JsonSerializerOptions` | `Web` | JSON serialization settings |
 | `ServiceAssembly` | `Assembly?` | `null` | Assembly to scan for services |
+| `ServiceAssemblies` | `Assembly[]?` | `null` | Multiple assemblies to scan (merged; wins over `ServiceAssembly`) |
 | `Security` | `KafkaSecurityOptions` | `new()` | First-class SSL/SASL settings (see below) |
 | `RawConfig` | `Dictionary<string,string>` | `{}` | Raw `librdkafka` key/values (any setting) |
 | `ConfigureConsumer` | `Action<ConsumerConfig>?` | `null` | Advanced consumer override (applied last) |
@@ -191,6 +199,58 @@ missing `method` header, unknown method) skip retries and apply the error policy
 
 Offset-commit and DLQ-publish failures are handled without crashing the consumer (the message is
 redelivered rather than lost).
+
+## Producing Messages
+
+Send to Irkalla services with the typed producer — `AddIrkallaKafka` registers `IKafkaProducer`, and
+producer-only apps use `AddIrkallaKafkaProducer` (no `GroupId` needed):
+
+```csharp
+// producer-only app
+builder.Services.AddIrkallaKafkaProducer(o => o.BootstrapServers = "localhost:9092");
+
+// anywhere
+public class OrderApi(IKafkaProducer kafka)
+{
+    public Task Place(CreateOrderRequest r) => kafka.SendAsync("orders-request", "CreateOrder", r);
+}
+```
+
+## Request-Reply (RPC)
+
+Send a request and await the typed reply, matched by a `correlation-id` header:
+
+```csharp
+builder.Services.AddIrkallaKafkaProducer(o => { o.BootstrapServers = "localhost:9092"; o.GroupId = "web"; });
+builder.Services.AddIrkallaKafkaRpcClient();
+
+// ...
+public class OrdersApi(IKafkaRpcClient rpc)
+{
+    public Task<OrderResult?> Create(CreateOrderRequest req) =>
+        rpc.CallAsync<CreateOrderRequest, OrderResult>("orders-request", "CreateOrder", req);
+}
+```
+
+The server just returns a value from its `[KafkaMethod]`. Times out with `KafkaRpcTimeoutException`
+(unknown outcome — keep server handlers idempotent). JSON serialization. See the wiki for details.
+
+## Configuration from appsettings.json
+
+```csharp
+builder.Services.AddIrkallaKafka(builder.Configuration, o => o.ServiceAssembly = typeof(Program).Assembly);
+```
+```json
+{ "IrkallaKafka": { "BootstrapServers": "broker:9092", "GroupId": "billing", "ConsumerMode": "Auto" } }
+```
+Code overrides config; `IOptions<IrkallaKafkaOptions>` is registered too.
+
+## Health check
+
+```csharp
+builder.Services.AddHealthChecks().AddCheck<IrkallaKafkaHealthCheck>("kafka");
+```
+Healthy when all consumers run, Degraded while starting, Unhealthy if any faults.
 
 ## Message Format
 

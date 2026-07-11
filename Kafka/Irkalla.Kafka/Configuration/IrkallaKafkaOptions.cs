@@ -19,6 +19,11 @@ namespace Irkalla.Kafka.Configuration
     public class IrkallaKafkaOptions
     {
         /// <summary>
+        /// Default configuration section name bound by <c>AddIrkallaKafka(IConfiguration)</c>.
+        /// </summary>
+        public const string SectionName = "IrkallaKafka";
+
+        /// <summary>
         /// Kafka bootstrap servers (comma-separated). Default: "localhost:9092".
         /// </summary>
         public string BootstrapServers { get; set; } = "localhost:9092";
@@ -68,6 +73,14 @@ namespace Irkalla.Kafka.Configuration
         public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromSeconds(30);
 
         /// <summary>
+        /// Enables the idempotent producer (<c>enable.idempotence</c>): librdkafka de-duplicates its
+        /// own internal retries so a produce is never written twice to a partition. Default: true.
+        /// This does NOT prevent duplicate <em>processing</em> on the consumer — for that use an
+        /// <c>IMessageDeduplicator</c> or idempotent handlers.
+        /// </summary>
+        public bool EnableIdempotence { get; set; } = true;
+
+        /// <summary>
         /// How many consumers to run per request topic. Default: <see cref="ConsumerMode.Single"/>.
         /// </summary>
         public ConsumerMode ConsumerMode { get; set; } = ConsumerMode.Single;
@@ -85,6 +98,14 @@ namespace Irkalla.Kafka.Configuration
         public string DlqTopicSuffix { get; set; } = ".dlq";
 
         /// <summary>
+        /// Whether to include the exception stack trace in the <c>stacktrace</c> header of DLQ
+        /// messages. Off by default: the stack trace can leak internal details (paths, types,
+        /// versions) to anyone with read access to the DLQ topic. The <c>error</c> header (exception
+        /// message) is always included. Enable only when the DLQ topic's access is trusted.
+        /// </summary>
+        public bool IncludeStackTraceInDlq { get; set; } = false;
+
+        /// <summary>
         /// Auto offset reset strategy for consumers. Default: Earliest.
         /// </summary>
         public AutoOffsetReset AutoOffsetReset { get; set; } = AutoOffsetReset.Earliest;
@@ -96,9 +117,16 @@ namespace Irkalla.Kafka.Configuration
 
         /// <summary>
         /// The assembly to scan for <see cref="Attributes.KafkaServiceAttribute"/> classes.
-        /// If null, the entry assembly is scanned.
+        /// If null (and <see cref="ServiceAssemblies"/> is empty), the entry assembly is scanned.
         /// </summary>
         public System.Reflection.Assembly? ServiceAssembly { get; set; }
+
+        /// <summary>
+        /// Multiple assemblies to scan for <see cref="Attributes.KafkaServiceAttribute"/> classes.
+        /// When set (non-empty), takes precedence over <see cref="ServiceAssembly"/>; services from
+        /// all assemblies are merged (services sharing a request topic share a consumer).
+        /// </summary>
+        public System.Reflection.Assembly[]? ServiceAssemblies { get; set; }
 
         /// <summary>
         /// Optional: override consumer configuration. Applied after standard settings.
@@ -141,12 +169,12 @@ namespace Irkalla.Kafka.Configuration
             }
         }
 
-        internal ConsumerConfig BuildConsumerConfig()
+        internal ConsumerConfig BuildConsumerConfig(string? groupIdOverride = null)
         {
             var config = new ConsumerConfig
             {
                 BootstrapServers = BootstrapServers,
-                GroupId = GroupId,
+                GroupId = string.IsNullOrEmpty(groupIdOverride) ? GroupId : groupIdOverride,
                 AutoOffsetReset = AutoOffsetReset,
                 EnableAutoCommit = false,
             };
@@ -169,6 +197,7 @@ namespace Irkalla.Kafka.Configuration
             var config = new ProducerConfig
             {
                 BootstrapServers = BootstrapServers,
+                EnableIdempotence = EnableIdempotence,
             };
 
             ApplyCommon(config);

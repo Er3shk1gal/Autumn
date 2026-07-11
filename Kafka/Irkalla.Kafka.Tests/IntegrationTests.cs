@@ -5,6 +5,8 @@ using Irkalla.Kafka.Configuration;
 using Irkalla.Kafka.Exceptions;
 using Irkalla.Kafka.Extensions;
 using Irkalla.Kafka.Hosting;
+using Irkalla.Kafka.Producing;
+using Irkalla.Kafka.Rpc;
 using Irkalla.Kafka.Utils.Models;
 using Confluent.Kafka;
 using Microsoft.Extensions.DependencyInjection;
@@ -49,6 +51,41 @@ public class IntegrationStopService
     {
         throw new KafkaConsumerException("Deterministic crash");
     }
+}
+
+[KafkaService("int-producer-topic", "int-producer-service", HandlerType = MessageHandlerType.JSON)]
+public class IntegrationProducerService
+{
+    public static string? Received;
+
+    [KafkaMethod("greet")]
+    public void Greet(string name) => Received = name;
+}
+
+[KafkaService("rpc-req-topic", "rpc-server")]
+public class RpcServerService
+{
+    public static int Calls;
+
+    // No RequiresResponse — the reply-to header (from the RPC client) drives the response.
+    [KafkaMethod("Echo")]
+    public EchoResponse Echo(EchoRequest req)
+    {
+        Interlocked.Increment(ref Calls);
+        return new($"echo:{req.Text}");
+    }
+}
+
+public record EchoRequest(string Text);
+public record EchoResponse(string Reply);
+
+[KafkaService("int-dedup-topic", "int-dedup-service")]
+public class IntegrationDedupService
+{
+    public static int Calls;
+
+    [KafkaMethod("work")]
+    public void Work(string payload) => Interlocked.Increment(ref Calls);
 }
 #endregion
 
@@ -287,6 +324,9 @@ public class IntegrationTests : IAsyncLifetime
         var errorMessage = Encoding.UTF8.GetString(errorHeader.GetValueBytes());
         Assert.Contains("Business failure", errorMessage);
 
+        // Stack trace must NOT leak into the DLQ by default (IncludeStackTraceInDlq = false).
+        Assert.Null(dlqMessage.Message.Headers.FirstOrDefault(h => h.Key == "stacktrace"));
+
         await host.StopAsync();
     }
 
@@ -325,6 +365,136 @@ public class IntegrationTests : IAsyncLifetime
         }
 
         // Just stop host cleanly if it hasn't stopped
+        await host.StopAsync();
+    }
+
+    [Fact]
+    public async Task Producer_SendAsync_ReachesHandler()
+    {
+        IntegrationProducerService.Received = null;
+        await PreCreateTopic("int-producer-topic");
+
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureServices(services =>
+            {
+                services.AddSingleton<IntegrationProducerService>();
+                services.AddIrkallaKafka(options =>
+                {
+                    options.BootstrapServers = _bootstrapServers;
+                    options.GroupId = "test-group-producer";
+                    options.ServiceAssembly = typeof(IrkallaKafkaOptions).Assembly;
+                    options.AutoCreateTopics = false;
+                });
+
+                var config = CreateTestConfig(typeof(IntegrationProducerService), "int-producer-topic", "Greet");
+                services.AddSingleton<IHostedService>(sp =>
+                    new KafkaConsumerHostedService(config, sp, sp.GetRequiredService<ILogger<KafkaConsumerHostedService>>()));
+            })
+            .Build();
+
+        await host.StartAsync();
+
+        // Send via the typed producer (no hand-built message / headers)
+        var producer = host.Services.GetRequiredService<IKafkaProducer>();
+        await producer.SendAsync("int-producer-topic", "greet", "World");
+
+        for (int i = 0; i < 100; i++)
+        {
+            if (IntegrationProducerService.Received != null) break;
+            await Task.Delay(100);
+        }
+
+        Assert.Equal("World", IntegrationProducerService.Received);
+        await host.StopAsync();
+    }
+
+    [Fact]
+    public async Task Deduplicator_Skips_Duplicate_MessageId()
+    {
+        IntegrationDedupService.Calls = 0;
+        await PreCreateTopic("int-dedup-topic");
+
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureServices(services =>
+            {
+                services.AddSingleton<IntegrationDedupService>();
+                services.AddIrkallaKafka(options =>
+                {
+                    options.BootstrapServers = _bootstrapServers;
+                    options.GroupId = "test-group-dedup";
+                    options.ServiceAssembly = typeof(IrkallaKafkaOptions).Assembly;
+                    options.AutoCreateTopics = false;
+                });
+                services.AddIrkallaKafkaInMemoryDeduplicator();
+
+                var config = CreateTestConfig(typeof(IntegrationDedupService), "int-dedup-topic", "Work");
+                services.AddSingleton<IHostedService>(sp =>
+                    new KafkaConsumerHostedService(config, sp, sp.GetRequiredService<ILogger<KafkaConsumerHostedService>>()));
+            })
+            .Build();
+
+        await host.StartAsync();
+
+        // Same message-id produced twice → handled once.
+        using (var producer = new ProducerBuilder<string, byte[]>(new ProducerConfig { BootstrapServers = _bootstrapServers }).Build())
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                await producer.ProduceAsync("int-dedup-topic", new Message<string, byte[]>
+                {
+                    Key = "k",
+                    Value = Encoding.UTF8.GetBytes("\"payload\""),
+                    Headers = new Headers
+                    {
+                        new Header("method", Encoding.UTF8.GetBytes("work")),
+                        new Header("message-id", Encoding.UTF8.GetBytes("dup-1")),
+                    },
+                });
+            }
+        }
+
+        // Wait for processing to settle, then assert exactly one invocation.
+        await Task.Delay(4000);
+        Assert.Equal(1, IntegrationDedupService.Calls);
+
+        await host.StopAsync();
+    }
+
+    [Fact]
+    public async Task Rpc_CallAsync_ReturnsTypedResponse()
+    {
+        await PreCreateTopic("rpc-req-topic");
+
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureServices(services =>
+            {
+                services.AddSingleton<RpcServerService>();
+                services.AddIrkallaKafka(options =>
+                {
+                    options.BootstrapServers = _bootstrapServers;
+                    options.GroupId = "rpc-test";
+                    options.ServiceName = "rpc-server";
+                    options.ServiceAssembly = typeof(IrkallaKafkaOptions).Assembly;
+                    options.AutoCreateTopics = true;
+                });
+
+                var config = CreateTestConfig(typeof(RpcServerService), "rpc-req-topic", "Echo");
+                services.AddSingleton<IHostedService>(sp =>
+                    new KafkaConsumerHostedService(config, sp, sp.GetRequiredService<ILogger<KafkaConsumerHostedService>>()));
+
+                services.AddIrkallaKafkaRpcClient(r => r.ReplyTopic = "rpc-replies-topic");
+            })
+            .Build();
+
+        await host.StartAsync();
+
+        var rpc = host.Services.GetRequiredService<IKafkaRpcClient>();
+        var response = await rpc.CallAsync<EchoRequest, EchoResponse>(
+            "rpc-req-topic", "Echo", new EchoRequest("hi"), TimeSpan.FromSeconds(30));
+
+        Assert.NotNull(response);
+        Assert.Equal("echo:hi", response!.Reply);
+
         await host.StopAsync();
     }
 }

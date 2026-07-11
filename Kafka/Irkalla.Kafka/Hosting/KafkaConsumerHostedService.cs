@@ -21,6 +21,7 @@ namespace Irkalla.Kafka.Hosting
     {
 
         private MessageHandlers.BaseMessageHandler? _handler;
+        private readonly string _healthId = Guid.NewGuid().ToString("N");
 
         /// <summary>
         /// The topic this consumer is bound to. Useful for diagnostics.
@@ -37,6 +38,8 @@ namespace Irkalla.Kafka.Hosting
 
             var options = serviceProvider.GetRequiredService<IrkallaKafkaOptions>();
             var topicManager = serviceProvider.GetRequiredService<KafkaTopicManager>();
+            var health = serviceProvider.GetRequiredService<ConsumerHealthState>();
+            health.Report(_healthId, topicName, ConsumerStatus.Starting);
 
             if (options.AutoCreateTopics)
             {
@@ -55,6 +58,7 @@ namespace Irkalla.Kafka.Hosting
             }
 
             _handler = CreateHandler();
+            health.Report(_healthId, topicName, ConsumerStatus.Running);
 
             try
             {
@@ -71,11 +75,13 @@ namespace Irkalla.Kafka.Hosting
             }
             catch (OperationCanceledException)
             {
+                health.Report(_healthId, topicName, ConsumerStatus.Stopped);
                 logger.LogInformation(
                     "Irkalla.Kafka: Consumer for topic '{Topic}' stopped.", topicName);
             }
             catch (Exception ex)
             {
+                health.Report(_healthId, topicName, ConsumerStatus.Faulted, ex.Message);
                 logger.LogError(ex,
                     "Irkalla.Kafka: Fatal error in consumer for topic '{Topic}'", topicName);
                 throw;
@@ -84,7 +90,7 @@ namespace Irkalla.Kafka.Hosting
 
         private MessageHandlers.BaseMessageHandler CreateHandler()
         {
-            var consumer = serviceProvider.GetRequiredService<Func<IConsumer<string, byte[]>>>()();
+            var consumer = serviceProvider.GetRequiredService<Func<string?, IConsumer<string, byte[]>>>()(handlerConfig.GroupId);
             var producer = serviceProvider.GetRequiredService<KafkaProducer>();
             var options = serviceProvider.GetRequiredService<IrkallaKafkaOptions>();
             
