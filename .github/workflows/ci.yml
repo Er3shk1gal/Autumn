@@ -121,22 +121,26 @@ jobs:
       run: pip install semgrep
 
     - name: Semgrep scan (SARIF)
-      # Informational: results go to the Security tab, they do not fail the build or block release.
-      # False positives on by-design reflection/deserialization are suppressed inline with
+      # Blocks the release: --error makes a finding fail this job, and publish depends on it.
+      # By-design reflection/deserialization false positives are suppressed inline with
       # `// nosemgrep: <rule-id>`.
-      run: semgrep scan --config=p/csharp --config=p/security-audit --sarif --output=semgrep.sarif
-      continue-on-error: true
+      run: semgrep scan --config=p/csharp --config=p/security-audit --error --sarif --output=semgrep.sarif
 
     - name: Upload SARIF
+      if: always()   # publish findings to the Security tab even when the scan failed the job
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: semgrep.sarif
 
   publish:
     name: Publish to NuGet.org + GitHub Packages
-    # Release gate: unit tests (build-and-test), no leaked secrets (secret-scan), and no
-    # dependency CVE with CVSS >= 6.0 (dependency-scan). A failure in any of these blocks publish.
-    needs: [build-and-test, secret-scan, dependency-scan]
+    # Release gate — ANY of these failing blocks the publish:
+    #   build-and-test    : build + unit tests
+    #   integration-tests : real-Kafka integration tests
+    #   secret-scan       : gitleaks (no leaked secrets)
+    #   dependency-scan   : no dependency CVE with CVSS >= 6.0
+    #   sast              : Semgrep (no code security findings)
+    needs: [build-and-test, integration-tests, secret-scan, dependency-scan, sast]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
