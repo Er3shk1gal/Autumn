@@ -17,10 +17,11 @@
 
     <!-- License / links -->
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/Er3shk1gal/Irkalla/tree/main/Kafka/Irkalla.Kafka</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/Er3shk1gal/Irkalla/tree/main</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Er3shk1gal/Irkalla.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
 
     <!-- Package quality: XML docs, deterministic build, SourceLink, symbols -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -53,6 +54,7 @@
   <!-- Pack the repository README as the NuGet front page -->
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="\" />
+    <None Include="icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
