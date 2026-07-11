@@ -24,7 +24,7 @@ jobs:
       with:
         dotnet-version: |
           8.0.x
-          9.0.x
+          10.0.x
 
     - name: Restore
       run: dotnet restore $SOLUTION
@@ -48,7 +48,7 @@ jobs:
       with:
         dotnet-version: |
           8.0.x
-          9.0.x
+          10.0.x
 
     - name: Integration tests (Testcontainers spins up Kafka)
       run: dotnet test $SOLUTION -c Release --filter "FullyQualifiedName~IntegrationTests"
@@ -170,7 +170,7 @@ jobs:
       with:
         dotnet-version: |
           8.0.x
-          9.0.x
+          10.0.x
 
     - name: NuGet login (Trusted Publishing → short-lived key)
       uses: NuGet/login@v1
