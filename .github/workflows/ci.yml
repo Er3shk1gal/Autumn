@@ -37,12 +37,6 @@ jobs:
       # asserts (Load/Auto) flake on shared runners, so run those locally only.
       run: dotnet test $SOLUTION --no-build -c Release --filter "FullyQualifiedName!~IntegrationTests&FullyQualifiedName!~LoadTests&FullyQualifiedName!~AutoConsumerTests"
 
-    - name: NuGet vulnerability audit
-      # Native .NET check against the NuGet advisory database. Fails on High/Critical.
-      run: |
-        dotnet list $SOLUTION package --vulnerable --include-transitive 2>&1 | tee audit.txt
-        ! grep -qiE 'Critical|High' audit.txt
-
   integration-tests:
     name: Integration tests (Kafka)
     runs-on: ubuntu-latest
@@ -72,23 +66,77 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependency-scan:
-    name: Dependency vuln scan (trivy)
+    name: Dependency CVE gate (max CVSS < 6.0)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Trivy filesystem scan
+
+    - name: Trivy scan (JSON)
       uses: aquasecurity/trivy-action@master
       with:
         scan-type: fs
         scan-ref: .
         scanners: vuln
-        severity: HIGH,CRITICAL
+        severity: MEDIUM,HIGH,CRITICAL   # MEDIUM band (4.0-6.9) so CVSS 6.x is reported too
         ignore-unfixed: true
-        exit-code: '1'
+        format: json
+        output: trivy.json
+        exit-code: '0'                   # gate on the exact CVSS below, not on trivy's bands
+
+    - name: Enforce max CVSS < 6.0
+      run: |
+        python3 - <<'PY'
+        import json, sys
+        data = json.load(open('trivy.json'))
+        worst, worst_id = 0.0, None
+        for res in data.get('Results') or []:
+            for v in res.get('Vulnerabilities') or []:
+                scores = []
+                for c in (v.get('CVSS') or {}).values():
+                    if c.get('V3Score') is not None: scores.append(c['V3Score'])
+                    elif c.get('V2Score') is not None: scores.append(c['V2Score'])
+                s = max(scores) if scores else 0.0
+                if s > worst:
+                    worst, worst_id = s, v.get('VulnerabilityID')
+        print(f"Highest dependency CVSS: {worst}" + (f" ({worst_id})" if worst_id else " — no vulnerabilities"))
+        if worst >= 6.0:
+            print(f"::error::{worst_id} has CVSS {worst} (>= 6.0) — security gate failed.")
+            sys.exit(1)
+        PY
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF to the code-scanning / Security tab
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Semgrep
+      run: pip install semgrep
+
+    - name: Semgrep scan (SARIF)
+      # Informational: results go to the Security tab, they do not fail the build or block release.
+      # False positives on by-design reflection/deserialization are suppressed inline with
+      # `// nosemgrep: <rule-id>`.
+      run: semgrep scan --config=p/csharp --config=p/security-audit --sarif --output=semgrep.sarif
+      continue-on-error: true
+
+    - name: Upload SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: semgrep.sarif
 
   publish:
     name: Publish to NuGet.org + GitHub Packages
-    needs: build-and-test
+    # Release gate: unit tests (build-and-test), no leaked secrets (secret-scan), and no
+    # dependency CVE with CVSS >= 6.0 (dependency-scan). A failure in any of these blocks publish.
+    needs: [build-and-test, secret-scan, dependency-scan]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -113,6 +161,26 @@ jobs:
 
     - name: Pack
       run: dotnet pack $PROJECT -c Release -o out
+
+    - name: Generate SBOM (CycloneDX)
+      run: |
+        dotnet tool install --global CycloneDX
+        export PATH="$PATH:$HOME/.dotnet/tools"
+        dotnet CycloneDX $PROJECT -o sbom -F Json
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+
+    - name: Sign SBOM (keyless — Sigstore/Fulcio + Rekor)
+      # Uses the job's OIDC identity (id-token: write). No keys to manage; the signature +
+      # cert are recorded in the public Rekor transparency log.
+      run: cosign sign-blob --yes sbom/bom.json --bundle sbom/bom.json.cosign.bundle
+
+    - name: Upload SBOM + signature
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom
+        path: sbom/*
 
     - name: Push to NuGet.org
       run: dotnet nuget push "out/*.nupkg" --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
