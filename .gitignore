@@ -396,3 +396,7 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Local wiki working copies — published separately to the GitHub wiki repo (Irkalla.wiki.git)
+/wiki/
+/Irkalla.wiki/

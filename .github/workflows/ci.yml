@@ -8,44 +8,114 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  SOLUTION: Kafka/Irkalla.Kafka/Irkalla.Kafka.sln
+  PROJECT: Kafka/Irkalla.Kafka/Irkalla.Kafka.csproj
+
 jobs:
   build-and-test:
+    name: Build & unit tests
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    
+    - uses: actions/checkout@v4
+
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v4
       with:
         dotnet-version: |
           8.0.x
           9.0.x
-        
-    - name: Restore dependencies
-      run: dotnet restore Kafka/Autumn.Kafka/Autumn.Kafka.sln
-      
+
+    - name: Restore
+      run: dotnet restore $SOLUTION
+
     - name: Build
-      run: dotnet build Kafka/Autumn.Kafka/Autumn.Kafka.sln --no-restore -c Release
-      
-    - name: Test
-      run: dotnet test Kafka/Autumn.Kafka/Autumn.Kafka.sln --no-build -c Release
+      run: dotnet build $SOLUTION --no-restore -c Release
+
+    - name: Unit tests (deterministic gate)
+      # Docker/Testcontainers tests run in the integration-tests job; timing-based throughput
+      # asserts (Load/Auto) flake on shared runners, so run those locally only.
+      run: dotnet test $SOLUTION --no-build -c Release --filter "FullyQualifiedName!~IntegrationTests&FullyQualifiedName!~LoadTests&FullyQualifiedName!~AutoConsumerTests"
+
+    - name: NuGet vulnerability audit
+      # Native .NET check against the NuGet advisory database. Fails on High/Critical.
+      run: |
+        dotnet list $SOLUTION package --vulnerable --include-transitive 2>&1 | tee audit.txt
+        ! grep -qiE 'Critical|High' audit.txt
+
+  integration-tests:
+    name: Integration tests (Kafka)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          8.0.x
+          9.0.x
+
+    - name: Integration tests (Testcontainers spins up Kafka)
+      run: dotnet test $SOLUTION -c Release --filter "FullyQualifiedName~IntegrationTests"
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # full history so gitleaks scans every commit
+    - name: gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-scan:
+    name: Dependency vuln scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Trivy filesystem scan
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        exit-code: '1'
 
   publish:
+    name: Publish to NuGet.org + GitHub Packages
     needs: build-and-test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # OIDC token for NuGet Trusted Publishing
     steps:
-    - uses: actions/checkout@v3
-    
+    - uses: actions/checkout@v4
+
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v4
       with:
         dotnet-version: |
           8.0.x
           9.0.x
-        
+
+    - name: NuGet login (Trusted Publishing → short-lived key)
+      uses: NuGet/login@v1
+      id: nuget-login
+      with:
+        user: Ereshkigal
+
     - name: Pack
-      run: dotnet pack Kafka/Autumn.Kafka/Autumn.Kafka.csproj -c Release -o out
-      
-    - name: Push to NuGet
-      run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      run: dotnet pack $PROJECT -c Release -o out
+
+    - name: Push to NuGet.org
+      run: dotnet nuget push "out/*.nupkg" --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+    - name: Push to GitHub Packages
+      run: dotnet nuget push "out/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/Er3shk1gal/index.json --skip-duplicate
