@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Irkalla.Kafka.Exceptions;
 using Irkalla.Kafka.Utils.Models;
 using Confluent.Kafka;
@@ -17,6 +18,7 @@ namespace Irkalla.Kafka.Utils
         public async Task<bool> ProduceAsync(
             TopicConfig topic, int partition, Message<string, byte[]> message)
         {
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 await EnsureTopicAvailableAsync(topic, partition);
@@ -31,12 +33,14 @@ namespace Irkalla.Kafka.Utils
 
                 if (deliveryResult.Status == PersistenceStatus.Persisted)
                 {
+                    KafkaTelemetry.RecordProduced(topic.TopicName);
                     logger.LogDebug(
                         "Message delivered to {Topic}[{Partition}] at offset {Offset}",
                         topic.TopicName, deliveryResult.Partition.Value, deliveryResult.Offset);
                     return true;
                 }
 
+                KafkaTelemetry.RecordProduceFailed(topic.TopicName);
                 logger.LogError(
                     "Message not persisted: status={Status}, topic={Topic}[{Partition}]",
                     deliveryResult.Status, topic.TopicName, deliveryResult.Partition.Value);
@@ -46,9 +50,14 @@ namespace Irkalla.Kafka.Utils
             }
             catch (ProduceException<string, byte[]> ex)
             {
+                KafkaTelemetry.RecordProduceFailed(topic.TopicName);
                 logger.LogError(ex, "Kafka produce error on {Topic}[{Partition}]",
                     topic.TopicName, partition);
                 throw new KafkaProducerException("Error producing message", ex);
+            }
+            finally
+            {
+                KafkaTelemetry.RecordProduceDuration(stopwatch.Elapsed.TotalMilliseconds, topic.TopicName);
             }
         }
 

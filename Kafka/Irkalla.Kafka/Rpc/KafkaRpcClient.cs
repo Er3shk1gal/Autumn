@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Irkalla.Kafka.Configuration;
@@ -201,6 +202,10 @@ namespace Irkalla.Kafka.Rpc
                 if (_options.ServiceName != null)
                     headers.Add("sender", Encoding.UTF8.GetBytes(_options.ServiceName));
 
+                // Producer span + trace-context injection so the RPC request→server hop stays on the
+                // same distributed trace (the reply carries correlation-id, matched by the consumer above).
+                using var activity = KafkaTelemetry.StartProduce(topic, method, headers);
+
                 var message = new Message<string, byte[]>
                 {
                     Key = key ?? corrId,
@@ -208,7 +213,22 @@ namespace Irkalla.Kafka.Rpc
                     Headers = headers,
                 };
 
-                await _producer.ProduceAsync(topic, message, cancellationToken).ConfigureAwait(false);
+                var stopwatch = Stopwatch.StartNew();
+                try
+                {
+                    await _producer.ProduceAsync(topic, message, cancellationToken).ConfigureAwait(false);
+                    KafkaTelemetry.RecordProduced(topic);
+                }
+                catch
+                {
+                    KafkaTelemetry.RecordProduceFailed(topic);
+                    activity?.SetStatus(ActivityStatusCode.Error);
+                    throw;
+                }
+                finally
+                {
+                    KafkaTelemetry.RecordProduceDuration(stopwatch.Elapsed.TotalMilliseconds, topic);
+                }
 
                 await using var reg = cancellationToken.Register(() =>
                 {

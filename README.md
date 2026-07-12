@@ -265,8 +265,10 @@ Body is serialized with `System.Text.Json` (or Avro/Protobuf if configured).
 ## Observability
 
 Irkalla.Kafka emits an `ActivitySource` and `Meter` named `"Irkalla.Kafka"`. Register them with
-OpenTelemetry to get distributed traces (producer → consumer → response) and metrics
-(`messages_processed`, `messages_failed`, `messages_dlq`, `retry_attempts`, `processing_duration`).
+OpenTelemetry to get distributed traces (producer → consumer → response — every producer and RPC
+call starts a `irkalla.kafka.produce` span and injects `traceparent`) and metrics: consumer
+(`messages_processed`, `messages_failed`, `messages_dlq`, `retry_attempts`, `processing_duration`)
+and producer (`messages_produced`, `messages_produce_failed`, `produce_duration`).
 
 ## Exceptions
 

@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Irkalla.Kafka.Configuration;
 using Irkalla.Kafka.Exceptions;
+using Irkalla.Kafka.Utils;
 using Confluent.Kafka;
 using Microsoft.Extensions.Logging;
 
@@ -45,23 +47,37 @@ namespace Irkalla.Kafka.Producing
                 foreach (var kv in headers)
                     kafkaHeaders.Add(kv.Key, Encoding.UTF8.GetBytes(kv.Value));
 
+            // Start a producer span and inject W3C trace context (traceparent/tracestate) into the
+            // headers so an external producer→consumer hop continues the distributed trace.
+            using var activity = KafkaTelemetry.StartProduce(topic, method, kafkaHeaders);
+
             var message = new Message<string, byte[]> { Key = key!, Value = value, Headers = kafkaHeaders };
 
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var result = await producer.ProduceAsync(topic, message, cancellationToken);
                 if (result.Status == PersistenceStatus.NotPersisted)
                 {
+                    KafkaTelemetry.RecordProduceFailed(topic);
+                    activity?.SetStatus(ActivityStatusCode.Error, "not persisted");
                     throw new KafkaProducerException(
                         $"Message to '{topic}' (method '{method}') was not persisted.");
                 }
+                KafkaTelemetry.RecordProduced(topic);
                 logger.LogDebug("Sent '{Method}' to {Topic}[{Partition}]@{Offset}",
                     method, topic, result.Partition.Value, result.Offset);
             }
             catch (ProduceException<string, byte[]> ex)
             {
+                KafkaTelemetry.RecordProduceFailed(topic);
+                activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
                 logger.LogError(ex, "Failed to send '{Method}' to '{Topic}'", method, topic);
                 throw new KafkaProducerException($"Failed to send message to '{topic}'.", ex);
+            }
+            finally
+            {
+                KafkaTelemetry.RecordProduceDuration(stopwatch.Elapsed.TotalMilliseconds, topic);
             }
         }
     }

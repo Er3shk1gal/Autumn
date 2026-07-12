@@ -29,8 +29,11 @@ namespace Irkalla.Kafka.MessageHandlers
         protected readonly Irkalla.Kafka.Configuration.IrkallaKafkaOptions Options = options;
         private readonly IMessageDeduplicator? _deduplicator = serviceProvider.GetService<IMessageDeduplicator>();
 
-        private static readonly ActivitySource ActivitySource = new("Irkalla.Kafka");
-        private static readonly Meter Meter = new("Irkalla.Kafka");
+        // Consumer-side instruments, created from the shared "Irkalla.Kafka" source/meter in
+        // KafkaTelemetry so producer, RPC client and consumer all report under a single ActivitySource
+        // and Meter (one AddSource / AddMeter registers the whole library).
+        private static readonly ActivitySource ActivitySource = KafkaTelemetry.ActivitySource;
+        private static readonly Meter Meter = KafkaTelemetry.Meter;
         private static readonly Counter<long> MessagesProcessedCounter = Meter.CreateCounter<long>("messages_processed");
         private static readonly Counter<long> MessagesFailedCounter = Meter.CreateCounter<long>("messages_failed");
         private static readonly Counter<long> MessagesDlqCounter = Meter.CreateCounter<long>("messages_dlq");
@@ -259,7 +262,7 @@ namespace Irkalla.Kafka.MessageHandlers
                 Value = value,
                 Headers = headers,
             };
-            InjectTraceHeaders(responseMessage.Headers);
+            KafkaTelemetry.InjectTraceHeaders(responseMessage.Headers);
 
             if (replyTo != null)
             {
@@ -364,7 +367,7 @@ namespace Irkalla.Kafka.MessageHandlers
             {
                 headers.Add("stacktrace", Encoding.UTF8.GetBytes(exception.StackTrace));
             }
-            InjectTraceHeaders(headers);
+            KafkaTelemetry.InjectTraceHeaders(headers);
 
             var message = new Message<string, byte[]>
             {
@@ -415,21 +418,6 @@ namespace Irkalla.Kafka.MessageHandlers
             }
 
             return activity;
-        }
-
-        private void InjectTraceHeaders(Headers headers)
-        {
-            var currentActivity = Activity.Current;
-            if (currentActivity != null && currentActivity.Id != null)
-            {
-                headers.Remove("traceparent");
-                headers.Add("traceparent", Encoding.UTF8.GetBytes(currentActivity.Id));
-                if (currentActivity.TraceStateString != null)
-                {
-                    headers.Remove("tracestate");
-                    headers.Add("tracestate", Encoding.UTF8.GetBytes(currentActivity.TraceStateString));
-                }
-            }
         }
 
         protected abstract Task<object?> DeserializeAsync(byte[] bytes, Type targetType, SerializationContext context);
